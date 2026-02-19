@@ -1,0 +1,485 @@
+{% extends "base.html" %}
+
+{% block title %}Confirm Deletion - Gmail Cleanup{% endblock %}
+
+{% block content %}
+<div class="confirm-page">
+    <h1>Confirm Deletion</h1>
+
+    <div class="warning-banner">
+        <strong>Review carefully before proceeding.</strong>
+        <p id="warningText">Emails will be moved to Trash (recoverable for 30 days).</p>
+    </div>
+
+    <div class="confirm-stats" id="confirmStats">
+        <div class="stat">
+            <span class="stat-value" id="emailCount">0</span>
+            <span class="stat-label">Emails to Delete</span>
+        </div>
+    </div>
+
+    <div class="selection-review" id="selectionReview" style="display: none;">
+        <h3>Selected Groups</h3>
+        <p class="help-text">Uncheck groups you want to exclude from deletion.</p>
+        <div id="groupsList" class="groups-list"></div>
+
+        <div id="individualEmailsSection" style="display: none;">
+            <h3>Individual Emails</h3>
+            <div id="individualEmailsList" class="individual-emails-list"></div>
+        </div>
+    </div>
+
+    <div class="delete-options">
+        <h3>Deletion Method</h3>
+        <label class="option">
+            <input type="radio" name="deleteMethod" value="trash" checked>
+            <span class="option-text">
+                <strong>Move to Trash (Recommended)</strong>
+                <small>Emails can be recovered for 30 days</small>
+            </span>
+        </label>
+        <label class="option">
+            <input type="radio" name="deleteMethod" value="permanent">
+            <span class="option-text">
+                <strong>Delete Permanently</strong>
+                <small>Cannot be undone - emails are gone forever</small>
+            </span>
+        </label>
+    </div>
+
+    <div class="confirm-actions">
+        <button id="cancelBtn" class="btn btn-secondary" onclick="goBack()">Cancel</button>
+        <button id="deleteBtn" class="btn btn-danger" onclick="performDelete()">
+            Delete <span id="deleteCount">0</span> Emails
+        </button>
+    </div>
+
+    <div id="progress" class="progress-container" style="display: none;">
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <p id="progressText">Deleting emails...</p>
+        <div class="progress-stats" id="progressStats">
+            <span id="progressDeleted">0 deleted</span>
+            <span id="progressRemaining">0 remaining</span>
+            <span id="progressErrors">0 errors</span>
+        </div>
+    </div>
+
+    <div id="result" class="result-container" style="display: none;">
+        <h2 id="resultTitle">Deletion Complete</h2>
+        <p id="resultMessage"></p>
+        <div class="result-actions">
+            <a href="{{ url_for('analyze') }}" class="btn btn-primary">Analyze More</a>
+            <a href="{{ url_for('index') }}" class="btn btn-secondary">Dashboard</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let emailIds = [];
+    let source = 'inbox';
+    let groups = [];
+    let individualEmails = [];
+    let selectedGroups = new Set();
+    let selectedIndividualEmails = new Set();
+
+    document.addEventListener('DOMContentLoaded', () => {
+        const stored = sessionStorage.getItem('deleteEmailIds');
+        source = sessionStorage.getItem('deleteSource') || 'inbox';
+        const storedGroups = sessionStorage.getItem('deleteGroups');
+        const storedIndividual = sessionStorage.getItem('deleteIndividualEmails');
+
+        if (!stored) {
+            alert('No emails selected for deletion');
+            window.location.href = '/analyze';
+            return;
+        }
+
+        emailIds = JSON.parse(stored);
+
+        // Load groups data
+        if (storedGroups) {
+            groups = JSON.parse(storedGroups);
+            groups.forEach((g, idx) => selectedGroups.add(idx));
+        }
+
+        // Load individual emails data
+        if (storedIndividual) {
+            individualEmails = JSON.parse(storedIndividual);
+            individualEmails.forEach(e => selectedIndividualEmails.add(e.id));
+        }
+
+        // Display groups and individual emails if we have data
+        displaySelections();
+        updateCounts();
+
+        if (source === 'trash') {
+            document.querySelector('input[value="trash"]').parentElement.style.display = 'none';
+            document.querySelector('input[value="permanent"]').checked = true;
+            document.getElementById('warningText').textContent =
+                'These emails will be PERMANENTLY deleted and cannot be recovered!';
+        }
+    });
+
+    function displaySelections() {
+        const reviewSection = document.getElementById('selectionReview');
+        const groupsList = document.getElementById('groupsList');
+        const individualSection = document.getElementById('individualEmailsSection');
+        const individualList = document.getElementById('individualEmailsList');
+
+        // Display groups
+        if (groups.length > 0) {
+            reviewSection.style.display = 'block';
+            groupsList.innerHTML = groups.map((group, idx) => `
+                <label class="group-item">
+                    <input type="checkbox"
+                           class="group-checkbox"
+                           data-group-idx="${idx}"
+                           checked
+                           onchange="toggleGroup(${idx})">
+                    <span class="group-info">
+                        <span class="group-name">${escapeHtml(group.display)}</span>
+                        <span class="group-meta">${group.count.toLocaleString()} emails (${formatSize(group.size_bytes)})</span>
+                    </span>
+                </label>
+            `).join('');
+        }
+
+        // Display individual emails
+        if (individualEmails.length > 0) {
+            reviewSection.style.display = 'block';
+            individualSection.style.display = 'block';
+            individualList.innerHTML = `
+                <label class="group-item individual-header">
+                    <input type="checkbox"
+                           id="selectAllIndividual"
+                           checked
+                           onchange="toggleAllIndividualEmails()">
+                    <span class="group-info">
+                        <span class="group-name">Individual Emails</span>
+                        <span class="group-meta">${individualEmails.length} emails selected individually</span>
+                    </span>
+                </label>
+                <div class="individual-emails-expand">
+                    ${individualEmails.map(email => `
+                        <label class="individual-email-item">
+                            <input type="checkbox"
+                                   class="individual-checkbox"
+                                   data-email-id="${email.id}"
+                                   checked
+                                   onchange="toggleIndividualEmail('${email.id}')">
+                            <span class="email-info">
+                                <span class="email-from">${escapeHtml(email.from)}</span>
+                                <span class="email-subject">${escapeHtml(email.subject)}</span>
+                            </span>
+                        </label>
+                    `).join('')}
+                </div>
+            `;
+        }
+    }
+
+    function toggleGroup(idx) {
+        if (selectedGroups.has(idx)) {
+            selectedGroups.delete(idx);
+        } else {
+            selectedGroups.add(idx);
+        }
+        updateCounts();
+    }
+
+    function toggleIndividualEmail(emailId) {
+        if (selectedIndividualEmails.has(emailId)) {
+            selectedIndividualEmails.delete(emailId);
+        } else {
+            selectedIndividualEmails.add(emailId);
+        }
+        updateSelectAllIndividualCheckbox();
+        updateCounts();
+    }
+
+    function toggleAllIndividualEmails() {
+        const selectAll = document.getElementById('selectAllIndividual').checked;
+        if (selectAll) {
+            individualEmails.forEach(e => selectedIndividualEmails.add(e.id));
+        } else {
+            selectedIndividualEmails.clear();
+        }
+        document.querySelectorAll('.individual-checkbox').forEach(cb => {
+            cb.checked = selectAll;
+        });
+        updateCounts();
+    }
+
+    function updateSelectAllIndividualCheckbox() {
+        const selectAllCb = document.getElementById('selectAllIndividual');
+        if (selectAllCb) {
+            selectAllCb.checked = individualEmails.every(e => selectedIndividualEmails.has(e.id));
+        }
+    }
+
+    function updateCounts() {
+        // Calculate total emails from selected groups
+        let totalEmails = 0;
+        groups.forEach((group, idx) => {
+            if (selectedGroups.has(idx)) {
+                totalEmails += group.count;
+            }
+        });
+
+        // Add individual emails
+        totalEmails += selectedIndividualEmails.size;
+
+        document.getElementById('emailCount').textContent = totalEmails.toLocaleString();
+        document.getElementById('deleteCount').textContent = totalEmails.toLocaleString();
+
+        // Disable delete button if nothing selected
+        const deleteBtn = document.getElementById('deleteBtn');
+        deleteBtn.disabled = totalEmails === 0;
+    }
+
+    function getSelectedEmailIds() {
+        const selectedIds = new Set();
+
+        // Add emails from selected groups
+        groups.forEach((group, idx) => {
+            if (selectedGroups.has(idx)) {
+                group.email_ids.forEach(id => selectedIds.add(id));
+            }
+        });
+
+        // Add selected individual emails
+        selectedIndividualEmails.forEach(id => selectedIds.add(id));
+
+        return [...selectedIds];
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function goBack() {
+        // Don't clear selection state - preserve it so user can continue editing
+        // Only clear the email IDs list (will be regenerated from selections)
+        sessionStorage.removeItem('deleteEmailIds');
+        sessionStorage.removeItem('deleteSource');
+        if (source === 'trash') {
+            window.location.href = '/trash';
+        } else {
+            window.location.href = '/analyze';
+        }
+    }
+
+    function clearAllSelectionState() {
+        // Clear everything after successful deletion
+        sessionStorage.removeItem('deleteEmailIds');
+        sessionStorage.removeItem('deleteSource');
+        sessionStorage.removeItem('deleteQueueKeys');
+        sessionStorage.removeItem('globalDeleteQueueIds');
+        sessionStorage.removeItem('deleteQueueEmailData');
+        sessionStorage.removeItem('deleteGroups');
+        sessionStorage.removeItem('deleteIndividualEmails');
+    }
+
+    // Safe element update helper
+    function safeSetText(elementId, text) {
+        const el = document.getElementById(elementId);
+        if (el) el.textContent = text;
+    }
+
+    function safeSetStyle(elementId, property, value) {
+        const el = document.getElementById(elementId);
+        if (el) el.style[property] = value;
+    }
+
+    function updateProgressUI(progress) {
+        if (!progress) return;
+
+        const p = progress;
+        const total = p.total || 0;
+        const current = p.current || 0;
+        const success = p.success || 0;
+        const errors = p.errors || 0;
+        const remaining = total - current;
+
+        if (total > 0) {
+            const percent = Math.round((current / total) * 100);
+            safeSetStyle('progressFill', 'width', `${percent}%`);
+        }
+
+        safeSetText('progressText', p.message || `Processing ${current.toLocaleString()} of ${total.toLocaleString()}...`);
+        safeSetText('progressDeleted', `${success.toLocaleString()} deleted`);
+        safeSetText('progressRemaining', `${remaining.toLocaleString()} remaining`);
+        safeSetText('progressErrors', `${errors} errors`);
+    }
+
+    async function performDelete() {
+        // Get selected email IDs based on current checkbox state
+        const selectedIds = getSelectedEmailIds();
+
+        if (selectedIds.length === 0) {
+            alert('No emails selected for deletion');
+            return;
+        }
+
+        const permanent = document.querySelector('input[name="deleteMethod"]:checked').value === 'permanent';
+
+        if (permanent) {
+            const confirmed = confirm(
+                'WARNING: This will PERMANENTLY delete ' + selectedIds.length +
+                ' emails. This cannot be undone!\n\nAre you absolutely sure?'
+            );
+            if (!confirmed) return;
+        }
+
+        const deleteBtn = document.getElementById('deleteBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const progressDiv = document.getElementById('progress');
+
+        if (deleteBtn) deleteBtn.disabled = true;
+        if (cancelBtn) cancelBtn.disabled = true;
+        if (progressDiv) progressDiv.style.display = 'block';
+
+        safeSetStyle('progressFill', 'width', '0%');
+        safeSetText('progressText', 'Starting deletion...');
+        safeSetText('progressDeleted', '0 deleted');
+        safeSetText('progressRemaining', `${selectedIds.length.toLocaleString()} remaining`);
+        safeSetText('progressErrors', '0 errors');
+
+        let consecutiveErrors = 0;
+        const maxConsecutiveErrors = 10;
+        let isPolling = true;
+
+        try {
+            // Start the deletion job with retry
+            let startData = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const startResponse = await fetch('/api/delete/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            email_ids: selectedIds,
+                            permanent: permanent
+                        })
+                    });
+                    startData = await startResponse.json();
+                    break;
+                } catch (e) {
+                    if (attempt < 2) {
+                        safeSetText('progressText', `Connection issue, retrying start... (${attempt + 1}/3)`);
+                        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            if (startData.error) {
+                throw new Error(startData.error);
+            }
+
+            // Poll for progress with retry logic
+            while (isPolling) {
+                await new Promise(resolve => setTimeout(resolve, 500)); // Poll every 500ms
+
+                let progressData = null;
+                try {
+                    const progressResponse = await fetch('/api/delete/progress');
+                    progressData = await progressResponse.json();
+                    consecutiveErrors = 0; // Reset on success
+                } catch (e) {
+                    consecutiveErrors++;
+                    console.log(`Polling error (${consecutiveErrors}/${maxConsecutiveErrors}): ${e.message}`);
+                    safeSetText('progressText', `Connection issue, retrying... (${consecutiveErrors}/${maxConsecutiveErrors})`);
+
+                    if (consecutiveErrors >= maxConsecutiveErrors) {
+                        throw new Error('Lost connection to server. The deletion may still be running in the background. Please wait and check your trash folder.');
+                    }
+                    // Wait longer before retry on error
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue;
+                }
+
+                if (progressData.status === 'error') {
+                    isPolling = false;
+                    safeSetStyle('progress', 'display', 'none');
+                    showDeleteError(progressData.error, progressData.progress);
+                    return;
+                }
+
+                if (progressData.status === 'complete') {
+                    isPolling = false;
+                    const result = progressData.result;
+                    const action = permanent ? 'permanently deleted' : 'moved to Trash';
+                    if (result.errors && result.errors.length > 0) {
+                        showResult(true,
+                            `${result.success.toLocaleString()} emails ${action}. ` +
+                            `${result.errors.length} emails failed.`
+                        );
+                    } else {
+                        showResult(true, `Successfully ${action} ${result.success.toLocaleString()} emails!`);
+                    }
+                    clearAllSelectionState();
+                    return;
+                }
+
+                if (progressData.status === 'running' && progressData.progress) {
+                    updateProgressUI(progressData.progress);
+                }
+
+                if (progressData.status === 'idle') {
+                    // Job might have finished or never started
+                    safeSetText('progressText', 'Waiting for deletion to start...');
+                }
+            }
+        } catch (error) {
+            safeSetStyle('progress', 'display', 'none');
+            showDeleteError(error.message, null);
+        }
+    }
+
+    function showDeleteError(errorMessage, progress) {
+        const resultDiv = document.getElementById('result');
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = `
+            <h2 class="error">Deletion Failed</h2>
+            <p>${errorMessage}</p>
+            ${progress ? `<p>Progress: ${progress.success || 0} deleted, ${progress.errors || 0} failed</p>` : ''}
+            <div class="result-actions">
+                <button class="btn btn-primary" onclick="retryDelete()">Retry Deletion</button>
+                <a href="{{ url_for('analyze') }}" class="btn btn-secondary">Back to Analysis</a>
+            </div>
+        `;
+        document.getElementById('deleteBtn').disabled = false;
+        document.getElementById('cancelBtn').disabled = false;
+    }
+
+    async function retryDelete() {
+        // Reset the delete job and try again
+        await fetch('/api/delete/reset', { method: 'POST' });
+        document.getElementById('result').style.display = 'none';
+        performDelete();
+    }
+
+    function showResult(success, message) {
+        document.getElementById('progress').style.display = 'none';
+        document.getElementById('result').style.display = 'block';
+        document.getElementById('resultTitle').textContent = success ? 'Deletion Complete' : 'Deletion Failed';
+        document.getElementById('resultTitle').className = success ? 'success' : 'error';
+        document.getElementById('resultMessage').textContent = message;
+    }
+</script>
+{% endblock %}

@@ -1,0 +1,1305 @@
+{% extends "base.html" %}
+
+{% block title %}Analyze Emails - Gmail Cleanup{% endblock %}
+
+{% block content %}
+<div class="analyze-page">
+    <h1>Email Analysis</h1>
+
+    <div id="cachedAnalysisPrompt" class="cached-analysis-prompt" style="display: none;">
+        <div class="prompt-content">
+            <h3>Previous Analysis Found</h3>
+            <p id="cachedInfo">Found cached analysis data.</p>
+            <div class="prompt-actions">
+                <button class="btn btn-primary" onclick="useCachedAnalysis()">Use Previous Analysis</button>
+                <button class="btn btn-secondary" onclick="startFreshAnalysis()">Analyze Again</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="analyze-controls">
+        <div class="control-group">
+            <label for="searchQuery">Search filter (optional):</label>
+            <input type="text" id="searchQuery" placeholder="e.g., older_than:1y, is:unread">
+        </div>
+        <button id="analyzeBtn" class="btn btn-primary">Analyze All Emails</button>
+    </div>
+
+    <div id="progress" class="progress-container" style="display: none;">
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <p id="progressText">Starting analysis...</p>
+    </div>
+
+    <div id="results" class="results-container" style="display: none;">
+        <div class="summary-card">
+            <h2>Summary</h2>
+            <div class="summary-stats" id="summaryStats"></div>
+        </div>
+
+        <div class="patterns-section">
+            <h2>Detected Patterns</h2>
+            <p class="help-text">Click on a pattern to drill down and see all emails. Use checkboxes to select patterns for deletion.</p>
+
+            <div class="pattern-tabs">
+                <button class="tab-btn active" data-tab="senders">Top Senders</button>
+                <button class="tab-btn" data-tab="categories">Categories</button>
+                <button class="tab-btn" data-tab="age">By Age</button>
+                <button class="tab-btn" data-tab="newsletters">Newsletters</button>
+                <button class="tab-btn" data-tab="size">Large Emails</button>
+            </div>
+
+            <div id="patternList" class="pattern-list"></div>
+            <div id="patternPagination" class="pagination"></div>
+        </div>
+
+        <div class="delete-queue" id="deleteQueue" style="display: none;">
+            <div class="delete-queue-info">
+                <h3>Ready to Delete: <span id="queueCount">0</span> emails</h3>
+            </div>
+            <div class="delete-queue-actions">
+                <button id="viewQueueBtn" class="btn btn-secondary" onclick="viewDeleteQueue()">View Selected</button>
+                <button id="clearQueueBtn" class="btn btn-secondary">Clear All</button>
+                <button id="deleteNowBtn" class="btn btn-danger" onclick="goToConfirm()">Delete Now</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete Queue Modal: Shows all emails selected for deletion -->
+    <div id="deleteQueueModal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3>Emails Selected for Deletion (<span id="queueModalCount">0</span>)</h3>
+                <button class="modal-close" onclick="closeDeleteQueueModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="deleteQueueBody">
+                <div id="deleteQueueList"></div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-buttons">
+                    <button class="btn btn-secondary" onclick="closeDeleteQueueModal()">Close</button>
+                    <button class="btn btn-secondary" onclick="clearDeleteQueue()">Clear All</button>
+                    <button class="btn btn-danger" onclick="goToConfirmFromModal()">Delete All Selected</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Drill-down Modal: Shows all emails in a pattern -->
+    <div id="drilldownModal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <div>
+                    <button class="btn btn-secondary btn-sm" onclick="closeDrilldown()">Back to Patterns</button>
+                    <h3 id="drilldownTitle" style="display: inline-block; margin-left: 1rem;">Emails</h3>
+                </div>
+                <button class="modal-close" onclick="closeDrilldown()">&times;</button>
+            </div>
+            <div class="modal-subheader" id="drilldownInfo"></div>
+            <div class="modal-body" id="drilldownBody">
+                <div id="emailList"></div>
+                <div id="pagination" class="pagination"></div>
+            </div>
+            <div class="modal-footer">
+                <div class="selection-actions">
+                    <label class="select-all-label">
+                        <input type="checkbox" id="selectAllEmails" onchange="toggleSelectAllEmails()">
+                        Select All on Page
+                    </label>
+                    <span id="selectedCount" class="selected-count">0 selected</span>
+                </div>
+                <div class="modal-buttons">
+                    <button class="btn btn-secondary" onclick="closeDrilldown()">Close</button>
+                    <button class="btn btn-danger" id="addSelectedBtn" onclick="addSelectedEmailsToQueue()">Add Selected to Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Email Content Modal: Shows full email content -->
+    <div id="emailModal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <div>
+                    <button class="btn btn-secondary btn-sm" onclick="closeEmailModal()">Back to List</button>
+                    <h3 id="emailSubject" style="display: inline-block; margin-left: 1rem;">Email</h3>
+                </div>
+                <button class="modal-close" onclick="closeEmailModal()">&times;</button>
+            </div>
+            <div class="email-meta" id="emailMeta"></div>
+            <div class="modal-body email-body-container" id="emailBody"></div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeEmailModal()">Close</button>
+                <button class="btn btn-danger" onclick="deleteCurrentEmail()">Delete This Email</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unsubscribe Modal -->
+    <div id="unsubscribeModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Unsubscribe</h3>
+                <button class="modal-close" onclick="closeUnsubscribeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="unsubscribeBody">
+                <div id="unsubscribeLoading" class="unsubscribe-loading">
+                    <p>Searching for unsubscribe link...</p>
+                    <div class="spinner"></div>
+                </div>
+                <div id="unsubscribeResult" style="display: none;">
+                    <p id="unsubscribeSender" class="unsubscribe-sender"></p>
+                    <div id="unsubscribeFound" style="display: none;">
+                        <p class="unsubscribe-info">Found unsubscribe link:</p>
+                        <div class="unsubscribe-link-container">
+                            <a id="unsubscribeUrl" href="#" target="_blank" class="btn btn-primary btn-unsubscribe">
+                                Open Unsubscribe Page
+                            </a>
+                        </div>
+                        <p class="unsubscribe-note">
+                            The link will open in a new tab. Follow the instructions on that page to unsubscribe.
+                        </p>
+                        <div id="unsubscribeMailto" style="display: none;">
+                            <p class="unsubscribe-or">Or send an email to unsubscribe:</p>
+                            <a id="unsubscribeMailtoLink" href="#" class="btn btn-secondary">
+                                Send Unsubscribe Email
+                            </a>
+                        </div>
+                    </div>
+                    <div id="unsubscribeNotFound" style="display: none;">
+                        <p class="unsubscribe-not-found">
+                            No unsubscribe link found in recent emails from this sender.
+                        </p>
+                        <p class="unsubscribe-tip">
+                            Tips:
+                        </p>
+                        <ul class="unsubscribe-tips-list">
+                            <li>Open a recent email and look for an "Unsubscribe" link at the bottom</li>
+                            <li>Check if the sender has a preferences page</li>
+                            <li>Mark emails as spam if they don't offer an unsubscribe option</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeUnsubscribeModal()">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Store analysis data globally
+    let analysisData = null;
+    let deleteQueue = new Set();
+    let currentPattern = null;
+    let currentEmailId = null;
+    let currentPage = 1;
+
+    // Pattern list pagination
+    let currentTab = 'senders';
+    let allPatternItems = [];
+    let patternPage = 1;
+    const patternsPerPage = 50;
+
+    // Email selection in drilldown
+    let selectedEmails = new Set();
+    let excludedEmails = new Set();
+    let currentPageEmails = []; // Store current page's email data
+
+    // Global delete queue - stores email IDs to be deleted
+    let globalDeleteQueue = new Set();
+    let deleteQueueEmailData = new Map(); // Store email metadata for display
+
+    document.getElementById('analyzeBtn').addEventListener('click', startAnalysis);
+    document.getElementById('reviewDeleteBtn').addEventListener('click', goToConfirm);
+    document.getElementById('clearQueueBtn').addEventListener('click', clearQueue);
+    document.getElementById('addPatternToQueueBtn').addEventListener('click', addCurrentPatternToQueue);
+
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    // Check for cached analysis on page load
+    let cachedAnalysisData = null;
+    document.addEventListener('DOMContentLoaded', checkCachedAnalysis);
+
+    async function checkCachedAnalysis() {
+        try {
+            const response = await fetch('/api/analyze/cached');
+            const data = await response.json();
+
+            if (data.status === 'available' && data.data) {
+                cachedAnalysisData = data.data;
+                const summary = data.data.summary || {};
+                const totalEmails = summary.total_emails || 0;
+                const totalSize = summary.total_size_mb || 0;
+                const deletedCount = summary.deleted_count || 0;
+
+                let infoText = `Found previous analysis: ${totalEmails.toLocaleString()} emails (${totalSize.toFixed(1)} MB)`;
+                if (deletedCount > 0) {
+                    infoText += ` - ${deletedCount.toLocaleString()} already deleted`;
+                }
+
+                document.getElementById('cachedInfo').textContent = infoText;
+                document.getElementById('cachedAnalysisPrompt').style.display = 'block';
+
+                // Restore any saved selections
+                restoreSelectionState();
+            }
+        } catch (error) {
+            console.log('No cached analysis available:', error);
+        }
+    }
+
+    function useCachedAnalysis() {
+        document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+        if (cachedAnalysisData) {
+            analysisData = cachedAnalysisData;
+            displayResults(cachedAnalysisData);
+            restoreSelectionState();
+            // Apply visual selections after a short delay to ensure DOM is ready
+            setTimeout(applyVisualSelections, 100);
+        }
+    }
+
+    function applyVisualSelections() {
+        // Update pattern items to show selection state
+        document.querySelectorAll('.pattern-item').forEach(item => {
+            const key = item.dataset.key;
+            if (deleteQueue.has(key)) {
+                item.classList.add('selected');
+                const checkbox = item.querySelector('input[type="checkbox"]');
+                if (checkbox) checkbox.checked = true;
+            }
+        });
+    }
+
+    function startFreshAnalysis() {
+        document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+        startAnalysis();
+    }
+
+    async function startAnalysis() {
+        const query = document.getElementById('searchQuery').value;
+
+        // Clear old selections when starting new analysis
+        deleteQueue.clear();
+        globalDeleteQueue.clear();
+        deleteQueueEmailData.clear();
+        clearSelectionState();
+        updateDeleteQueue();
+        updateGlobalDeleteQueueUI();
+
+        document.getElementById('analyzeBtn').disabled = true;
+        document.getElementById('progress').style.display = 'block';
+        document.getElementById('results').style.display = 'none';
+        document.getElementById('progressFill').style.width = '0%';
+        document.getElementById('progressText').textContent = 'Starting analysis...';
+
+        try {
+            // Start the analysis job
+            const startResponse = await fetch('/api/analyze/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query })
+            });
+
+            const startData = await startResponse.json();
+            if (startData.error) {
+                throw new Error(startData.error);
+            }
+
+            // Poll for progress
+            while (true) {
+                await new Promise(resolve => setTimeout(resolve, 500)); // Poll every 500ms
+
+                const progressResponse = await fetch('/api/analyze/progress');
+                const progressData = await progressResponse.json();
+
+                if (progressData.status === 'error') {
+                    throw new Error(progressData.error);
+                }
+
+                if (progressData.status === 'complete') {
+                    analysisData = progressData.data;
+                    displayResults(progressData.data);
+                    document.getElementById('analyzeBtn').disabled = false;
+                    document.getElementById('progress').style.display = 'none';
+                    return;
+                }
+
+                if (progressData.status === 'running' && progressData.progress) {
+                    const p = progressData.progress;
+                    // Update progress bar
+                    if (p.total > 0) {
+                        const percent = Math.round((p.current / p.total) * 100);
+                        document.getElementById('progressFill').style.width = `${percent}%`;
+                    }
+                    // Update progress text
+                    document.getElementById('progressText').textContent = p.message || `${p.stage}: ${p.current.toLocaleString()} / ${p.total.toLocaleString()}`;
+                }
+
+                if (progressData.status === 'idle') {
+                    // Job finished but no result? Something went wrong
+                    throw new Error('Analysis stopped unexpectedly');
+                }
+            }
+        } catch (error) {
+            alert('Analysis failed: ' + error.message);
+            document.getElementById('analyzeBtn').disabled = false;
+            document.getElementById('progress').style.display = 'none';
+        }
+    }
+
+    function displayResults(data) {
+        document.getElementById('results').style.display = 'block';
+
+        // Display summary
+        const summary = data.summary;
+        const deletedCount = summary.deleted_count || 0;
+
+        let summaryHtml = `
+            <div class="stat">
+                <span class="stat-value">${summary.total_emails.toLocaleString()}</span>
+                <span class="stat-label">Remaining Emails</span>
+            </div>
+            <div class="stat">
+                <span class="stat-value">${summary.total_size_mb} MB</span>
+                <span class="stat-label">Total Size</span>
+            </div>
+            <div class="stat">
+                <span class="stat-value">${summary.unread_count.toLocaleString()}</span>
+                <span class="stat-label">Unread</span>
+            </div>
+            <div class="stat">
+                <span class="stat-value">${summary.newsletter_count.toLocaleString()}</span>
+                <span class="stat-label">Newsletters</span>
+            </div>
+        `;
+
+        if (deletedCount > 0) {
+            summaryHtml += `
+                <div class="stat stat-success">
+                    <span class="stat-value">${deletedCount.toLocaleString()}</span>
+                    <span class="stat-label">Already Deleted</span>
+                </div>
+            `;
+        }
+
+        document.getElementById('summaryStats').innerHTML = summaryHtml;
+
+        // Show first tab
+        switchTab('senders');
+    }
+
+    function switchTab(tab) {
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.tab === tab);
+        });
+
+        if (!analysisData) return;
+
+        currentTab = tab;
+        patternPage = 1;
+        const patterns = analysisData.patterns;
+
+        switch(tab) {
+            case 'senders':
+                allPatternItems = [...patterns.by_sender_domain];
+                break;
+            case 'categories':
+                allPatternItems = [...patterns.by_category];
+                break;
+            case 'age':
+                allPatternItems = [...patterns.by_age];
+                break;
+            case 'newsletters':
+                allPatternItems = [...patterns.newsletters];
+                break;
+            case 'size':
+                allPatternItems = [...patterns.by_size];
+                break;
+        }
+
+        displayPatternPage(1);
+    }
+
+    function displayPatternPage(page) {
+        patternPage = page;
+        const totalItems = allPatternItems.length;
+        const totalPages = Math.ceil(totalItems / patternsPerPage);
+        const start = (page - 1) * patternsPerPage;
+        const end = start + patternsPerPage;
+        const pageItems = allPatternItems.slice(start, end);
+
+        displayPatternList(pageItems, totalItems);
+        displayPatternPagination(page, totalPages, totalItems);
+    }
+
+    function displayPatternPagination(page, totalPages, totalItems) {
+        const pag = document.getElementById('patternPagination');
+
+        if (totalPages <= 1) {
+            pag.innerHTML = totalItems > 0 ? `<p class="pagination-info">Showing all ${totalItems.toLocaleString()} groups</p>` : '';
+            return;
+        }
+
+        let buttons = [];
+        const start = (page - 1) * patternsPerPage + 1;
+        const end = Math.min(page * patternsPerPage, totalItems);
+
+        buttons.push(`<span class="pagination-info">Showing ${start.toLocaleString()}-${end.toLocaleString()} of ${totalItems.toLocaleString()} groups</span>`);
+
+        // Previous button
+        if (page > 1) {
+            buttons.push(`<button class="btn btn-sm" onclick="displayPatternPage(${page - 1})">Previous</button>`);
+        }
+
+        // Page numbers
+        const pageStart = Math.max(1, page - 2);
+        const pageEnd = Math.min(totalPages, page + 2);
+
+        if (pageStart > 1) {
+            buttons.push(`<button class="btn btn-sm" onclick="displayPatternPage(1)">1</button>`);
+            if (pageStart > 2) buttons.push(`<span>...</span>`);
+        }
+
+        for (let i = pageStart; i <= pageEnd; i++) {
+            buttons.push(`<button class="btn btn-sm ${i === page ? 'btn-primary' : ''}" onclick="displayPatternPage(${i})">${i}</button>`);
+        }
+
+        if (pageEnd < totalPages) {
+            if (pageEnd < totalPages - 1) buttons.push(`<span>...</span>`);
+            buttons.push(`<button class="btn btn-sm" onclick="displayPatternPage(${totalPages})">${totalPages}</button>`);
+        }
+
+        // Next button
+        if (page < totalPages) {
+            buttons.push(`<button class="btn btn-sm" onclick="displayPatternPage(${page + 1})">Next</button>`);
+        }
+
+        pag.innerHTML = buttons.join(' ');
+    }
+
+    function displayPatternList(items, totalItems = null) {
+        const list = document.getElementById('patternList');
+
+        if (items.length === 0) {
+            list.innerHTML = '<p class="no-data">No patterns found in this category.</p>';
+            return;
+        }
+
+        list.innerHTML = items.map(item => {
+            const isDeleted = item.count === 0 && item.deleted_count > 0;
+            const hasDeleted = item.deleted_count > 0 && item.count > 0;
+            // Show unsubscribe button for sender-related patterns
+            const showUnsubscribe = !isDeleted && (item.type === 'sender_domain' || item.type === 'sender_email' || item.type === 'newsletter');
+
+            return `
+            <div class="pattern-item ${deleteQueue.has(item.key) ? 'selected' : ''} ${isDeleted ? 'deleted' : ''}"
+                 data-type="${item.type}"
+                 data-key="${escapeAttr(item.key)}">
+                <div class="pattern-info" onclick="${isDeleted ? '' : `openDrilldown('${item.type}', '${escapeAttr(item.key)}')`}">
+                    <span class="pattern-name">${escapeHtml(item.display)}</span>
+                    <span class="pattern-meta">
+                        ${isDeleted
+                            ? `<span class="deleted-badge">✓ Deleted (${item.deleted_count} emails)</span>`
+                            : `${item.count.toLocaleString()} emails
+                               (${formatSize(item.size_bytes)})
+                               ${item.unread > 0 ? `- ${item.unread} unread` : ''}
+                               ${hasDeleted ? `<span class="partial-deleted">- ${item.deleted_count} deleted</span>` : ''}`
+                        }
+                    </span>
+                </div>
+                <div class="pattern-actions">
+                    ${isDeleted ? '' : `
+                        ${showUnsubscribe ? `<button class="btn btn-sm btn-unsubscribe-action" onclick="event.stopPropagation(); openUnsubscribe('${escapeAttr(item.key)}', '${escapeAttr(item.display)}')" title="Find unsubscribe link">Unsubscribe</button>` : ''}
+                        <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openDrilldown('${item.type}', '${escapeAttr(item.key)}')">View All</button>
+                        <input type="checkbox"
+                               ${deleteQueue.has(item.key) ? 'checked' : ''}
+                               onclick="event.stopPropagation(); togglePattern('${item.type}', '${escapeAttr(item.key)}', ${item.email_ids.length}, ${item.size_bytes})">
+                    `}
+                </div>
+            </div>
+        `}).join('');
+    }
+
+    // ========== Drill-down View ==========
+    async function openDrilldown(type, key) {
+        currentPattern = { type, key };
+        currentPage = 1;
+        document.getElementById('drilldownModal').style.display = 'flex';
+        await loadEmails(1);
+    }
+
+    async function loadEmails(page) {
+        currentPage = page;
+        document.getElementById('emailList').innerHTML = '<p>Loading emails...</p>';
+
+        try {
+            const response = await fetch(`/api/pattern/${currentPattern.type}/${encodeURIComponent(currentPattern.key)}/emails?page=${page}&per_page=50`);
+            const data = await response.json();
+
+            if (data.error) {
+                document.getElementById('emailList').innerHTML = `<p class="error">${data.error}</p>`;
+                return;
+            }
+
+            // Update header
+            document.getElementById('drilldownTitle').textContent = data.pattern.display;
+            document.getElementById('drilldownInfo').innerHTML = `
+                <span><strong>${data.pattern.count.toLocaleString()}</strong> emails</span>
+                <span><strong>${formatSize(data.pattern.size_bytes)}</strong> total size</span>
+                <span>Page ${data.pagination.page} of ${data.pagination.total_pages}</span>
+            `;
+
+            // Store current page emails for selection
+            currentPageEmails = data.emails;
+
+            // Display emails
+            displayEmailList(data.emails);
+
+            // Display pagination
+            displayPagination(data.pagination);
+
+        } catch (error) {
+            document.getElementById('emailList').innerHTML = `<p class="error">${error.message}</p>`;
+        }
+    }
+
+    function displayEmailList(emails) {
+        const list = document.getElementById('emailList');
+
+        list.innerHTML = `
+            <table class="email-table">
+                <thead>
+                    <tr>
+                        <th class="checkbox-col"></th>
+                        <th>From</th>
+                        <th>Subject</th>
+                        <th>Date</th>
+                        <th>Size</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${emails.map(email => `
+                        <tr class="email-row ${selectedEmails.has(email.id) ? 'selected' : ''} ${excludedEmails.has(email.id) ? 'excluded' : ''}" data-email-id="${email.id}">
+                            <td class="checkbox-col" onclick="event.stopPropagation();">
+                                <input type="checkbox"
+                                       class="email-checkbox"
+                                       data-email-id="${email.id}"
+                                       ${selectedEmails.has(email.id) ? 'checked' : ''}
+                                       onchange="toggleEmailSelection('${email.id}')">
+                            </td>
+                            <td class="email-from" onclick="openEmail('${email.id}')">${escapeHtml(email.from_name || email.from)}</td>
+                            <td class="email-subject" onclick="openEmail('${email.id}')">${escapeHtml(email.subject || '(no subject)')}</td>
+                            <td class="email-date" onclick="openEmail('${email.id}')">${email.date}</td>
+                            <td class="email-size" onclick="openEmail('${email.id}')">${email.size_kb} KB</td>
+                            <td class="email-actions">
+                                <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); openEmail('${email.id}')">Read</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+
+        // Update selection UI
+        updateSelectionUI();
+    }
+
+    function displayPagination(pagination) {
+        const pag = document.getElementById('pagination');
+
+        if (pagination.total_pages <= 1) {
+            pag.innerHTML = '';
+            return;
+        }
+
+        let buttons = [];
+
+        // Previous button
+        if (pagination.has_prev) {
+            buttons.push(`<button class="btn btn-sm" onclick="loadEmails(${pagination.page - 1})">Previous</button>`);
+        }
+
+        // Page numbers
+        const start = Math.max(1, pagination.page - 2);
+        const end = Math.min(pagination.total_pages, pagination.page + 2);
+
+        if (start > 1) {
+            buttons.push(`<button class="btn btn-sm" onclick="loadEmails(1)">1</button>`);
+            if (start > 2) buttons.push(`<span>...</span>`);
+        }
+
+        for (let i = start; i <= end; i++) {
+            buttons.push(`<button class="btn btn-sm ${i === pagination.page ? 'btn-primary' : ''}" onclick="loadEmails(${i})">${i}</button>`);
+        }
+
+        if (end < pagination.total_pages) {
+            if (end < pagination.total_pages - 1) buttons.push(`<span>...</span>`);
+            buttons.push(`<button class="btn btn-sm" onclick="loadEmails(${pagination.total_pages})">${pagination.total_pages}</button>`);
+        }
+
+        // Next button
+        if (pagination.has_next) {
+            buttons.push(`<button class="btn btn-sm" onclick="loadEmails(${pagination.page + 1})">Next</button>`);
+        }
+
+        pag.innerHTML = buttons.join(' ');
+    }
+
+    function closeDrilldown() {
+        document.getElementById('drilldownModal').style.display = 'none';
+        currentPattern = null;
+        // Clear selections when closing
+        selectedEmails.clear();
+        currentPageEmails = [];
+        document.getElementById('selectAllEmails').checked = false;
+    }
+
+    // ========== Email Selection Functions ==========
+    function toggleEmailSelection(emailId) {
+        const row = document.querySelector(`.email-row[data-email-id="${emailId}"]`);
+        const checkbox = document.querySelector(`.email-checkbox[data-email-id="${emailId}"]`);
+
+        if (selectedEmails.has(emailId)) {
+            selectedEmails.delete(emailId);
+            if (row) row.classList.remove('selected');
+            if (checkbox) checkbox.checked = false;
+        } else {
+            selectedEmails.add(emailId);
+            excludedEmails.delete(emailId);
+            if (row) {
+                row.classList.add('selected');
+                row.classList.remove('excluded');
+            }
+            if (checkbox) checkbox.checked = true;
+        }
+        updateSelectionUI();
+    }
+
+    function toggleSelectAllEmails() {
+        const selectAll = document.getElementById('selectAllEmails').checked;
+
+        if (selectAll) {
+            currentPageEmails.forEach(email => {
+                selectedEmails.add(email.id);
+                excludedEmails.delete(email.id);
+            });
+        } else {
+            currentPageEmails.forEach(email => {
+                selectedEmails.delete(email.id);
+            });
+        }
+
+        // Update checkboxes
+        document.querySelectorAll('.email-checkbox').forEach(cb => {
+            cb.checked = selectAll;
+        });
+
+        // Update row styles
+        document.querySelectorAll('.email-row').forEach(row => {
+            row.classList.toggle('selected', selectAll);
+        });
+
+        updateSelectionUI();
+    }
+
+    function updateSelectionUI() {
+        const count = selectedEmails.size;
+        document.getElementById('selectedCount').textContent = `${count} selected`;
+
+        // Show/hide action buttons based on selection
+        const hasSelection = count > 0;
+        const addBtn = document.getElementById('addSelectedBtn');
+        if (addBtn) addBtn.style.display = hasSelection ? 'inline-block' : 'none';
+
+        // Update select all checkbox state
+        const allChecked = currentPageEmails.length > 0 &&
+            currentPageEmails.every(e => selectedEmails.has(e.id));
+        document.getElementById('selectAllEmails').checked = allChecked;
+    }
+
+    function addSelectedEmailsToQueue() {
+        if (selectedEmails.size === 0) {
+            alert('No emails selected');
+            return;
+        }
+
+        // Add selected emails to global delete queue
+        let addedCount = 0;
+        selectedEmails.forEach(id => {
+            if (!globalDeleteQueue.has(id)) {
+                globalDeleteQueue.add(id);
+                addedCount++;
+            }
+        });
+
+        // Store email metadata for display
+        currentPageEmails.forEach(email => {
+            if (selectedEmails.has(email.id)) {
+                deleteQueueEmailData.set(email.id, email);
+            }
+        });
+
+        // Update delete queue UI
+        updateGlobalDeleteQueueUI();
+
+        // Mark rows as added
+        document.querySelectorAll('.email-row').forEach(row => {
+            const emailId = row.dataset.emailId;
+            if (selectedEmails.has(emailId)) {
+                row.classList.add('in-delete-queue');
+            }
+        });
+
+        // Clear selection
+        selectedEmails.clear();
+        document.querySelectorAll('.email-checkbox').forEach(cb => cb.checked = false);
+        document.querySelectorAll('.email-row').forEach(row => row.classList.remove('selected'));
+        document.getElementById('selectAllEmails').checked = false;
+        updateSelectionUI();
+
+        if (addedCount > 0) {
+            showToast(`${addedCount} emails added to delete queue`);
+        }
+    }
+
+    function showToast(message) {
+        // Simple toast notification
+        const toast = document.createElement('div');
+        toast.className = 'toast-notification';
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.classList.add('show'), 10);
+        setTimeout(() => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 300);
+        }, 2000);
+    }
+
+    function updateGlobalDeleteQueueUI() {
+        const queueDiv = document.getElementById('deleteQueue');
+        const count = globalDeleteQueue.size;
+
+        if (count === 0) {
+            queueDiv.style.display = 'none';
+            return;
+        }
+
+        document.getElementById('queueCount').textContent = count.toLocaleString();
+        queueDiv.style.display = 'flex';
+    }
+
+    function viewDeleteQueue() {
+        document.getElementById('deleteQueueModal').style.display = 'flex';
+        document.getElementById('queueModalCount').textContent = globalDeleteQueue.size.toLocaleString();
+
+        const list = document.getElementById('deleteQueueList');
+
+        if (globalDeleteQueue.size === 0) {
+            list.innerHTML = '<p class="no-data">No emails selected for deletion.</p>';
+            return;
+        }
+
+        // Build the list from stored email data
+        const emails = [];
+        globalDeleteQueue.forEach(id => {
+            const email = deleteQueueEmailData.get(id);
+            if (email) {
+                emails.push(email);
+            } else {
+                emails.push({ id: id, from: 'Unknown', subject: '(email data not loaded)', date: '', size_kb: 0 });
+            }
+        });
+
+        list.innerHTML = `
+            <table class="email-table">
+                <thead>
+                    <tr>
+                        <th>From</th>
+                        <th>Subject</th>
+                        <th>Date</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${emails.map(email => `
+                        <tr class="email-row" data-email-id="${email.id}">
+                            <td class="email-from">${escapeHtml(email.from_name || email.from)}</td>
+                            <td class="email-subject">${escapeHtml(email.subject || '(no subject)')}</td>
+                            <td class="email-date">${email.date || ''}</td>
+                            <td class="email-actions">
+                                <button class="btn btn-sm btn-secondary" onclick="removeFromDeleteQueue('${email.id}')">Remove</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    function closeDeleteQueueModal() {
+        document.getElementById('deleteQueueModal').style.display = 'none';
+    }
+
+    function removeFromDeleteQueue(emailId) {
+        globalDeleteQueue.delete(emailId);
+        deleteQueueEmailData.delete(emailId);
+        updateGlobalDeleteQueueUI();
+        viewDeleteQueue(); // Refresh the list
+    }
+
+    function clearDeleteQueue() {
+        globalDeleteQueue.clear();
+        deleteQueueEmailData.clear();
+        updateGlobalDeleteQueueUI();
+        closeDeleteQueueModal();
+    }
+
+    function goToConfirmFromModal() {
+        if (globalDeleteQueue.size === 0) {
+            alert('No emails to delete');
+            return;
+        }
+
+        // Save selection state so we can restore if user comes back
+        saveSelectionState();
+
+        // Store email IDs from globalDeleteQueue in session storage
+        const emailIds = [...globalDeleteQueue];
+        sessionStorage.setItem('deleteEmailIds', JSON.stringify(emailIds));
+        sessionStorage.setItem('deleteSource', 'inbox');
+        window.location.href = '/confirm';
+    }
+
+    // ========== Email Content View ==========
+    async function openEmail(emailId) {
+        currentEmailId = emailId;
+        document.getElementById('emailModal').style.display = 'flex';
+        document.getElementById('emailBody').innerHTML = '<p>Loading email content...</p>';
+
+        try {
+            const response = await fetch(`/api/email/${emailId}`);
+            const email = await response.json();
+
+            if (email.error) {
+                document.getElementById('emailBody').innerHTML = `<p class="error">${email.error}</p>`;
+                return;
+            }
+
+            // Update header
+            document.getElementById('emailSubject').textContent = email.subject || '(no subject)';
+            document.getElementById('emailMeta').innerHTML = `
+                <div class="meta-row"><strong>From:</strong> ${escapeHtml(email.from_name ? `${email.from_name} <${email.from}>` : email.from)}</div>
+                <div class="meta-row"><strong>To:</strong> ${escapeHtml(email.to)}</div>
+                <div class="meta-row"><strong>Date:</strong> ${email.date}</div>
+                <div class="meta-row"><strong>Size:</strong> ${formatSize(email.size_bytes)}</div>
+            `;
+
+            // Display body - prefer HTML, fallback to text
+            if (email.body_html) {
+                // Use iframe for HTML content to isolate styles
+                document.getElementById('emailBody').innerHTML = `
+                    <div class="email-content-toggle">
+                        <button class="btn btn-sm active" onclick="showHtmlContent()">HTML</button>
+                        <button class="btn btn-sm" onclick="showTextContent()">Plain Text</button>
+                    </div>
+                    <div id="htmlContent">
+                        <iframe id="emailIframe" sandbox="allow-same-origin" class="email-iframe"></iframe>
+                    </div>
+                    <div id="textContent" style="display: none;">
+                        <pre class="email-text">${escapeHtml(email.body_text || 'No plain text version available')}</pre>
+                    </div>
+                `;
+                // Set iframe content
+                const iframe = document.getElementById('emailIframe');
+                iframe.srcdoc = email.body_html;
+            } else if (email.body_text) {
+                document.getElementById('emailBody').innerHTML = `
+                    <pre class="email-text">${escapeHtml(email.body_text)}</pre>
+                `;
+            } else {
+                document.getElementById('emailBody').innerHTML = `
+                    <p class="email-snippet">${escapeHtml(email.snippet || 'No content available')}</p>
+                `;
+            }
+
+        } catch (error) {
+            document.getElementById('emailBody').innerHTML = `<p class="error">${error.message}</p>`;
+        }
+    }
+
+    function showHtmlContent() {
+        document.getElementById('htmlContent').style.display = 'block';
+        document.getElementById('textContent').style.display = 'none';
+        document.querySelectorAll('.email-content-toggle button').forEach((btn, i) => {
+            btn.classList.toggle('active', i === 0);
+        });
+    }
+
+    function showTextContent() {
+        document.getElementById('htmlContent').style.display = 'none';
+        document.getElementById('textContent').style.display = 'block';
+        document.querySelectorAll('.email-content-toggle button').forEach((btn, i) => {
+            btn.classList.toggle('active', i === 1);
+        });
+    }
+
+    function closeEmailModal() {
+        document.getElementById('emailModal').style.display = 'none';
+        currentEmailId = null;
+    }
+
+    async function deleteCurrentEmail() {
+        if (!currentEmailId) return;
+
+        if (!confirm('Move this email to trash?')) return;
+
+        try {
+            const response = await fetch('/api/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email_ids: [currentEmailId], permanent: false })
+            });
+
+            const result = await response.json();
+
+            if (result.error) {
+                alert('Failed to delete: ' + result.error);
+                return;
+            }
+
+            alert('Email moved to trash');
+            closeEmailModal();
+
+            // Refresh the email list
+            if (currentPattern) {
+                loadEmails(currentPage);
+            }
+
+        } catch (error) {
+            alert('Failed to delete: ' + error.message);
+        }
+    }
+
+    // ========== Delete Queue Management ==========
+    function togglePattern(type, key, count, size) {
+        const item = document.querySelector(`.pattern-item[data-key="${CSS.escape(key)}"]`);
+        const checkbox = item ? item.querySelector('input[type="checkbox"]') : null;
+
+        if (deleteQueue.has(key)) {
+            // Remove from queue
+            deleteQueue.delete(key);
+            if (item) {
+                item.classList.remove('selected');
+            }
+            if (checkbox) {
+                checkbox.checked = false;
+            }
+        } else {
+            // Add to queue
+            deleteQueue.add(key);
+            if (item) {
+                item.classList.add('selected');
+            }
+            if (checkbox) {
+                checkbox.checked = true;
+            }
+        }
+
+        updateDeleteQueue();
+    }
+
+    function addCurrentPatternToQueue() {
+        if (!currentPattern) return;
+
+        if (!deleteQueue.has(currentPattern.key)) {
+            deleteQueue.add(currentPattern.key);
+            updateDeleteQueue();
+        }
+
+        closeDrilldown();
+    }
+
+    function updateDeleteQueue() {
+        const queueDiv = document.getElementById('deleteQueue');
+
+        if (deleteQueue.size === 0) {
+            queueDiv.style.display = 'none';
+            return;
+        }
+
+        // Calculate totals
+        let totalEmails = 0;
+        let totalSize = 0;
+
+        const patterns = analysisData.patterns;
+        for (const category of Object.values(patterns)) {
+            for (const pattern of category) {
+                if (deleteQueue.has(pattern.key)) {
+                    totalEmails += pattern.email_ids.length;
+                    totalSize += pattern.size_bytes;
+                }
+            }
+        }
+
+        document.getElementById('queueCount').textContent = totalEmails.toLocaleString();
+        queueDiv.style.display = 'flex';
+    }
+
+    function clearQueue() {
+        deleteQueue.clear();
+        updateDeleteQueue();
+
+        // Update visual state - uncheck all checkboxes
+        document.querySelectorAll('.pattern-item').forEach(item => {
+            item.classList.remove('selected');
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (checkbox) {
+                checkbox.checked = false;
+            }
+        });
+    }
+
+    function goToConfirm() {
+        // Collect all email IDs from both pattern-level and individual selections
+        const emailIds = [];
+
+        // Add emails from pattern-level selections (deleteQueue contains pattern keys)
+        if (analysisData && analysisData.patterns) {
+            const patterns = analysisData.patterns;
+            for (const category of Object.values(patterns)) {
+                if (Array.isArray(category)) {
+                    for (const pattern of category) {
+                        if (deleteQueue.has(pattern.key) && Array.isArray(pattern.email_ids)) {
+                            emailIds.push(...pattern.email_ids);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also add individual email selections (globalDeleteQueue contains email IDs)
+        if (globalDeleteQueue.size > 0) {
+            emailIds.push(...globalDeleteQueue);
+        }
+
+        if (emailIds.length === 0) {
+            alert('No emails selected for deletion. Please select patterns first.');
+            return;
+        }
+
+        // Save selection state so we can restore if user comes back
+        saveSelectionState();
+
+        // Store in session storage for confirm page (deduplicate)
+        sessionStorage.setItem('deleteEmailIds', JSON.stringify([...new Set(emailIds)]));
+        sessionStorage.setItem('deleteSource', 'inbox');
+        window.location.href = '/confirm';
+    }
+
+    function saveSelectionState() {
+        // Save deleteQueue (pattern keys)
+        sessionStorage.setItem('deleteQueueKeys', JSON.stringify([...deleteQueue]));
+        // Save globalDeleteQueue (individual email IDs)
+        sessionStorage.setItem('globalDeleteQueueIds', JSON.stringify([...globalDeleteQueue]));
+        // Save email metadata for display
+        const emailDataArray = [];
+        deleteQueueEmailData.forEach((value, key) => {
+            emailDataArray.push([key, value]);
+        });
+        sessionStorage.setItem('deleteQueueEmailData', JSON.stringify(emailDataArray));
+
+        // Save group/pattern information for confirm page
+        const groupsData = [];
+        if (analysisData && analysisData.patterns) {
+            const patterns = analysisData.patterns;
+            for (const category of Object.values(patterns)) {
+                if (Array.isArray(category)) {
+                    for (const pattern of category) {
+                        if (deleteQueue.has(pattern.key) && Array.isArray(pattern.email_ids)) {
+                            groupsData.push({
+                                key: pattern.key,
+                                display: pattern.display,
+                                type: pattern.type,
+                                count: pattern.email_ids.length,
+                                size_bytes: pattern.size_bytes,
+                                email_ids: pattern.email_ids
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        sessionStorage.setItem('deleteGroups', JSON.stringify(groupsData));
+
+        // Save individual emails count for confirm page
+        if (globalDeleteQueue.size > 0) {
+            const individualEmails = [];
+            globalDeleteQueue.forEach(id => {
+                const email = deleteQueueEmailData.get(id);
+                individualEmails.push({
+                    id: id,
+                    from: email ? (email.from_name || email.from) : 'Unknown',
+                    subject: email ? email.subject : '(no subject)'
+                });
+            });
+            sessionStorage.setItem('deleteIndividualEmails', JSON.stringify(individualEmails));
+        }
+    }
+
+    function restoreSelectionState() {
+        // Get currently available patterns to check which ones still have emails
+        const availablePatterns = new Map();
+        if (cachedAnalysisData && cachedAnalysisData.patterns) {
+            for (const category of Object.values(cachedAnalysisData.patterns)) {
+                if (Array.isArray(category)) {
+                    for (const pattern of category) {
+                        // Only include patterns that still have emails
+                        if (pattern.count > 0) {
+                            availablePatterns.set(pattern.key, pattern);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Restore deleteQueue (pattern keys) - only for patterns that still have emails
+        const savedKeys = sessionStorage.getItem('deleteQueueKeys');
+        if (savedKeys) {
+            const keys = JSON.parse(savedKeys);
+            keys.forEach(key => {
+                // Only restore if the pattern still has emails
+                if (availablePatterns.has(key)) {
+                    deleteQueue.add(key);
+                }
+            });
+        }
+
+        // Restore globalDeleteQueue (individual email IDs)
+        // Note: We can't easily check if these emails still exist, so restore all
+        // The deletion will just skip any that no longer exist
+        const savedIds = sessionStorage.getItem('globalDeleteQueueIds');
+        if (savedIds) {
+            const ids = JSON.parse(savedIds);
+            ids.forEach(id => globalDeleteQueue.add(id));
+        }
+
+        // Restore email metadata
+        const savedEmailData = sessionStorage.getItem('deleteQueueEmailData');
+        if (savedEmailData) {
+            const emailDataArray = JSON.parse(savedEmailData);
+            emailDataArray.forEach(([key, value]) => {
+                deleteQueueEmailData.set(key, value);
+            });
+        }
+
+        // Update UI if we have selections
+        if (deleteQueue.size > 0 || globalDeleteQueue.size > 0) {
+            updateDeleteQueue();
+            updateGlobalDeleteQueueUI();
+        }
+    }
+
+    function clearSelectionState() {
+        sessionStorage.removeItem('deleteQueueKeys');
+        sessionStorage.removeItem('globalDeleteQueueIds');
+        sessionStorage.removeItem('deleteQueueEmailData');
+        sessionStorage.removeItem('deleteEmailIds');
+        sessionStorage.removeItem('deleteSource');
+    }
+
+    // ========== Utility Functions ==========
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function escapeAttr(text) {
+        if (!text) return '';
+        return text.replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+
+    // Close modals on escape key
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            if (document.getElementById('unsubscribeModal').style.display === 'flex') {
+                closeUnsubscribeModal();
+            } else if (document.getElementById('emailModal').style.display === 'flex') {
+                closeEmailModal();
+            } else if (document.getElementById('drilldownModal').style.display === 'flex') {
+                closeDrilldown();
+            }
+        }
+    });
+
+    // ========== Unsubscribe Functions ==========
+    async function openUnsubscribe(senderKey, displayName) {
+        // Show modal with loading state
+        document.getElementById('unsubscribeModal').style.display = 'flex';
+        document.getElementById('unsubscribeLoading').style.display = 'block';
+        document.getElementById('unsubscribeResult').style.display = 'none';
+
+        try {
+            const response = await fetch(`/api/unsubscribe/${encodeURIComponent(senderKey)}`);
+            const data = await response.json();
+
+            // Hide loading, show result
+            document.getElementById('unsubscribeLoading').style.display = 'none';
+            document.getElementById('unsubscribeResult').style.display = 'block';
+
+            // Update sender display
+            document.getElementById('unsubscribeSender').textContent = `Sender: ${displayName}`;
+
+            if (data.found && data.url) {
+                // Found unsubscribe link
+                document.getElementById('unsubscribeFound').style.display = 'block';
+                document.getElementById('unsubscribeNotFound').style.display = 'none';
+
+                const unsubUrl = document.getElementById('unsubscribeUrl');
+                unsubUrl.href = data.url;
+
+                // Handle mailto link if available
+                if (data.mailto) {
+                    document.getElementById('unsubscribeMailto').style.display = 'block';
+                    document.getElementById('unsubscribeMailtoLink').href = data.mailto;
+                } else {
+                    document.getElementById('unsubscribeMailto').style.display = 'none';
+                }
+            } else {
+                // No link found
+                document.getElementById('unsubscribeFound').style.display = 'none';
+                document.getElementById('unsubscribeNotFound').style.display = 'block';
+            }
+
+        } catch (error) {
+            document.getElementById('unsubscribeLoading').style.display = 'none';
+            document.getElementById('unsubscribeResult').style.display = 'block';
+            document.getElementById('unsubscribeSender').textContent = `Error: ${error.message}`;
+            document.getElementById('unsubscribeFound').style.display = 'none';
+            document.getElementById('unsubscribeNotFound').style.display = 'block';
+        }
+    }
+
+    function closeUnsubscribeModal() {
+        document.getElementById('unsubscribeModal').style.display = 'none';
+    }
+</script>
+{% endblock %}

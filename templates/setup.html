@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup - Gmail Cleanup</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="setup-container">
+        <h1>Gmail Cleanup App</h1>
+        <div class="setup-card">
+            <h2>Setup Required</h2>
+            <p>To use this app, you need to set up Google OAuth credentials.</p>
+
+            <div class="setup-steps">
+                <h3>Follow these steps:</h3>
+                <ol>
+                    <li>
+                        <strong>Create a Google Cloud Project</strong>
+                        <p>Go to <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a></p>
+                        <p>Create a new project or select an existing one</p>
+                    </li>
+                    <li>
+                        <strong>Enable Gmail API</strong>
+                        <p>Go to APIs & Services > Library</p>
+                        <p>Search for "Gmail API" and enable it</p>
+                    </li>
+                    <li>
+                        <strong>Configure OAuth Consent Screen</strong>
+                        <p>Go to APIs & Services > OAuth consent screen</p>
+                        <p>Choose "External" user type</p>
+                        <p>Fill in the required fields (app name, email)</p>
+                        <p>Add scopes: gmail.readonly, gmail.modify</p>
+                        <p>Add your email as a test user</p>
+                    </li>
+                    <li>
+                        <strong>Create OAuth Credentials</strong>
+                        <p>Go to APIs & Services > Credentials</p>
+                        <p>Click "Create Credentials" > "OAuth client ID"</p>
+                        <p>Choose "Web application" as the type</p>
+                        <p>Add authorized redirect URI: <code>http://127.0.0.1:5000/oauth/callback</code></p>
+                        <p>Download the JSON file</p>
+                    </li>
+                    <li>
+                        <strong>Save Credentials</strong>
+                        <p>Rename the downloaded file to <code>credentials.json</code></p>
+                        <p>Place it in the same folder as this application</p>
+                    </li>
+                </ol>
+            </div>
+
+            <div class="setup-note">
+                <p><strong>Note:</strong> After placing credentials.json, refresh this page to continue.</p>
+            </div>
+
+            <a href="{{ url_for('index') }}" class="btn btn-primary">I've added credentials.json - Continue</a>
+        </div>
+    </div>
+</body>
+</html>

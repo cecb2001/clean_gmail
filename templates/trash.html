@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+
+{% block title %}Review Trash - Gmail Cleanup{% endblock %}
+
+{% block content %}
+<div class="trash-page">
+    <h1>Review Trash</h1>
+
+    <div class="info-banner">
+        <p>Items in Trash are automatically deleted after 30 days.
+           Permanently delete them now to immediately reclaim storage space.</p>
+    </div>
+
+    <div class="analyze-controls">
+        <button id="analyzeTrashBtn" class="btn btn-primary">Analyze Trash</button>
+    </div>
+
+    <div id="progress" class="progress-container" style="display: none;">
+        <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <p id="progressText">Analyzing trash...</p>
+    </div>
+
+    <div id="results" class="results-container" style="display: none;">
+        <div class="summary-card">
+            <h2>Trash Summary</h2>
+            <div class="summary-stats" id="summaryStats"></div>
+        </div>
+
+        <div class="patterns-section">
+            <h2>Trash Contents by Sender</h2>
+            <p class="help-text">Select items to permanently delete. This action cannot be undone.</p>
+
+            <div id="trashList" class="pattern-list"></div>
+        </div>
+
+        <div class="delete-queue" id="deleteQueue" style="display: none;">
+            <h3>Selected for Permanent Deletion: <span id="queueCount">0</span> emails</h3>
+            <p>Storage to reclaim: <span id="queueSize">0 KB</span></p>
+            <button id="deleteBtn" class="btn btn-danger">Permanently Delete Selected</button>
+            <button id="clearQueueBtn" class="btn btn-secondary">Clear Selection</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let trashData = null;
+    let deleteQueue = new Set();
+
+    document.getElementById('analyzeTrashBtn').addEventListener('click', analyzeTrash);
+    document.getElementById('deleteBtn').addEventListener('click', goToConfirm);
+    document.getElementById('clearQueueBtn').addEventListener('click', clearQueue);
+
+    async function analyzeTrash() {
+        document.getElementById('analyzeTrashBtn').disabled = true;
+        document.getElementById('progress').style.display = 'block';
+        document.getElementById('results').style.display = 'none';
+
+        try {
+            const response = await fetch('/api/trash/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ max_emails: 5000 })
+            });
+
+            const data = await response.json();
+
+            if (data.error) {
+                alert('Analysis failed: ' + data.error);
+                return;
+            }
+
+            trashData = data;
+            displayResults(data);
+        } catch (error) {
+            alert('Analysis failed: ' + error.message);
+        } finally {
+            document.getElementById('analyzeTrashBtn').disabled = false;
+            document.getElementById('progress').style.display = 'none';
+        }
+    }
+
+    function displayResults(data) {
+        document.getElementById('results').style.display = 'block';
+
+        const summary = data.summary;
+        document.getElementById('summaryStats').innerHTML = `
+            <div class="stat">
+                <span class="stat-value">${summary.total_emails.toLocaleString()}</span>
+                <span class="stat-label">Items in Trash</span>
+            </div>
+            <div class="stat">
+                <span class="stat-value">${summary.total_size_mb} MB</span>
+                <span class="stat-label">Storage Used</span>
+            </div>
+        `;
+
+        // Display sender patterns
+        const items = data.patterns.by_sender_domain.slice(0, 50);
+        displayTrashList(items);
+    }
+
+    function displayTrashList(items) {
+        const list = document.getElementById('trashList');
+
+        if (items.length === 0) {
+            list.innerHTML = '<p class="no-data">Trash is empty.</p>';
+            return;
+        }
+
+        list.innerHTML = items.map(item => `
+            <div class="pattern-item ${deleteQueue.has(item.key) ? 'selected' : ''}"
+                 data-key="${item.key}">
+                <div class="pattern-info">
+                    <span class="pattern-name">${escapeHtml(item.display)}</span>
+                    <span class="pattern-meta">
+                        ${item.count.toLocaleString()} emails
+                        (${formatSize(item.size_bytes)})
+                    </span>
+                </div>
+                <div class="pattern-actions">
+                    <input type="checkbox"
+                           ${deleteQueue.has(item.key) ? 'checked' : ''}
+                           onchange="togglePattern('${item.key}', ${item.email_ids.length}, ${item.size_bytes})">
+                </div>
+            </div>
+        `).join('');
+    }
+
+    function togglePattern(key, count, size) {
+        if (deleteQueue.has(key)) {
+            deleteQueue.delete(key);
+        } else {
+            deleteQueue.add(key);
+        }
+        updateDeleteQueue();
+
+        const item = document.querySelector(`.pattern-item[data-key="${key}"]`);
+        if (item) {
+            item.classList.toggle('selected', deleteQueue.has(key));
+        }
+    }
+
+    function updateDeleteQueue() {
+        const queueDiv = document.getElementById('deleteQueue');
+
+        if (deleteQueue.size === 0) {
+            queueDiv.style.display = 'none';
+            return;
+        }
+
+        let totalEmails = 0;
+        let totalSize = 0;
+
+        const patterns = trashData.patterns.by_sender_domain;
+        for (const pattern of patterns) {
+            if (deleteQueue.has(pattern.key)) {
+                totalEmails += pattern.email_ids.length;
+                totalSize += pattern.size_bytes;
+            }
+        }
+
+        document.getElementById('queueCount').textContent = totalEmails.toLocaleString();
+        document.getElementById('queueSize').textContent = formatSize(totalSize);
+        queueDiv.style.display = 'block';
+    }
+
+    function clearQueue() {
+        deleteQueue.clear();
+        updateDeleteQueue();
+
+        document.querySelectorAll('.pattern-item').forEach(item => {
+            item.classList.remove('selected');
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (checkbox) checkbox.checked = false;
+        });
+    }
+
+    function goToConfirm() {
+        const emailIds = [];
+        const patterns = trashData.patterns.by_sender_domain;
+
+        for (const pattern of patterns) {
+            if (deleteQueue.has(pattern.key)) {
+                emailIds.push(...pattern.email_ids);
+            }
+        }
+
+        sessionStorage.setItem('deleteEmailIds', JSON.stringify([...new Set(emailIds)]));
+        sessionStorage.setItem('deleteSource', 'trash');
+        window.location.href = '/confirm';
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+</script>
+{% endblock %}

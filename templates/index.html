@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Gmail Cleanup{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <h1>Welcome to Gmail Cleanup</h1>
+
+    <div class="profile-card">
+        <h2>Account Overview</h2>
+        <div class="profile-info">
+            <div class="stat">
+                <span class="stat-label">Email</span>
+                <span class="stat-value">{{ profile.email }}</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Total Messages</span>
+                <span class="stat-value">{{ "{:,}".format(profile.messages_total) }}</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Total Threads</span>
+                <span class="stat-value">{{ "{:,}".format(profile.threads_total) }}</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="action-cards">
+        <div class="action-card">
+            <h3>Analyze Inbox</h3>
+            <p>Scan your emails to find patterns like frequent senders, newsletters, and old emails that can be cleaned up.</p>
+            <a href="{{ url_for('analyze') }}" class="btn btn-primary">Start Analysis</a>
+        </div>
+
+        <div class="action-card">
+            <h3>Review Trash</h3>
+            <p>Review items in your trash and permanently delete them to reclaim storage space.</p>
+            <a href="{{ url_for('trash') }}" class="btn btn-secondary">Review Trash</a>
+        </div>
+    </div>
+
+    <div class="safety-note">
+        <h3>Safety First</h3>
+        <ul>
+            <li>All deletions require your explicit confirmation</li>
+            <li>Emails are moved to Trash first (recoverable for 30 days)</li>
+            <li>You'll see exactly what will be deleted before confirming</li>
+            <li>Your data stays on your machine - no external servers</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}
