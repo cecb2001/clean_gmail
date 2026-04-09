@@ -366,6 +366,30 @@ a:hover {
     font-weight: 500;
 }
 
+.spam-score {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-right: 0.4rem;
+}
+
+.spam-high {
+    background-color: #fce4ec;
+    color: #c62828;
+}
+
+.spam-med {
+    background-color: #fff3e0;
+    color: #e65100;
+}
+
+.spam-low {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+}
+
 .pattern-info {
     display: flex;
     flex-direction: column;
@@ -1239,4 +1263,388 @@ a:hover {
 .toast-notification.show {
     transform: translateX(-50%) translateY(0);
     opacity: 1;
+}
+
+/* ========== Rules Page ========== */
+.rules-page .page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.rules-page .page-header h1 {
+    margin: 0;
+}
+
+.rules-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.rule-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.25rem;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    gap: 1rem;
+}
+
+.rule-card:hover {
+    border-color: #1a73e8;
+}
+
+.rule-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.rule-name {
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.rule-conditions {
+    font-size: 0.875rem;
+    color: #555;
+    margin-bottom: 0.25rem;
+}
+
+.rule-description {
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.rule-last-run {
+    font-size: 0.8rem;
+    color: #2e7d32;
+}
+
+.rule-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.action-badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.action-trash {
+    background: #fff3e0;
+    color: #e65100;
+}
+
+.action-delete {
+    background: #ffebee;
+    color: #c62828;
+}
+
+/* Rule Form */
+.rule-form .control-group {
+    margin-bottom: 1rem;
+}
+
+.rule-form .control-group input[type="text"],
+.rule-form .control-group input[type="number"] {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+}
+
+.conditions-section {
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    background: #f9f9f9;
+    border-radius: 8px;
+}
+
+.conditions-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+}
+
+.conditions-header label {
+    font-weight: 500;
+}
+
+.logic-toggle {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.875rem;
+}
+
+.condition-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.condition-row select,
+.condition-row input {
+    padding: 0.4rem 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 0.875rem;
+}
+
+.condition-row .cond-field { min-width: 140px; }
+.condition-row .cond-operator { min-width: 100px; }
+.condition-row .cond-value-container select,
+.condition-row .cond-value-container input { min-width: 150px; }
+
+.action-options {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.action-option {
+    display: flex;
+    flex-direction: column;
+    padding: 0.75rem 1rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    cursor: pointer;
+    flex: 1;
+    min-width: 180px;
+}
+
+.action-option:hover {
+    border-color: #1a73e8;
+}
+
+.action-option span {
+    font-weight: 500;
+}
+
+.action-option small {
+    color: #666;
+    font-size: 0.8rem;
+}
+
+/* Preview */
+.preview-summary {
+    display: flex;
+    gap: 2rem;
+    margin-bottom: 1rem;
+    padding: 1rem;
+    background: #f5f5f5;
+    border-radius: 8px;
+}
+
+.spinner-container {
+    text-align: center;
+    padding: 2rem;
+}
+
+/* ========== Unsubscribe Page ========== */
+.unsubscribe-page h1 {
+    margin-bottom: 0.5rem;
+}
+
+.unsub-tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.unsub-controls {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
+.suggestions-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.suggestion-card {
+    display: flex;
+    align-items: center;
+    padding: 1rem;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    gap: 1rem;
+    transition: border-color 0.2s;
+}
+
+.suggestion-card:hover {
+    border-color: #1a73e8;
+}
+
+.suggestion-card.selected {
+    border-color: #1a73e8;
+    background: #e8f0fe;
+}
+
+.suggestion-card.unsub-done {
+    border-color: #a5d6a7;
+    background: #e8f5e9;
+    opacity: 0.7;
+}
+
+.suggestion-select {
+    flex-shrink: 0;
+}
+
+.suggestion-select input {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
+
+.suggestion-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.suggestion-name {
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.suggestion-meta {
+    font-size: 0.875rem;
+    color: #666;
+    margin-bottom: 0.25rem;
+}
+
+.suggestion-reasons {
+    display: flex;
+    gap: 0.25rem;
+    flex-wrap: wrap;
+}
+
+.reason-tag {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    background: #f1f3f4;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    color: #555;
+}
+
+.suggestion-score {
+    flex-shrink: 0;
+}
+
+.score-indicator {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: white;
+}
+
+.score-high { background: #d93025; }
+.score-medium { background: #f9a825; }
+.score-low { background: #9e9e9e; }
+
+.suggestion-actions {
+    flex-shrink: 0;
+}
+
+/* Status badges */
+.status-badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+.status-success {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.status-failed {
+    background: #ffebee;
+    color: #c62828;
+}
+
+.method-tag {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    background: #e3f2fd;
+    color: #1565c0;
+    border-radius: 12px;
+    font-size: 0.75rem;
+}
+
+.btn-success-static {
+    background: #2e7d32;
+    color: white;
+    cursor: default;
+}
+
+/* Batch details */
+.batch-details {
+    margin-top: 1rem;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.batch-detail-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid #f0f0f0;
+    font-size: 0.875rem;
+}
+
+.batch-sender {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+    .rule-card {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .rule-actions {
+        align-self: flex-end;
+    }
+    .suggestion-card {
+        flex-wrap: wrap;
+    }
+    .condition-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
 }

@@ -510,7 +510,7 @@
                     <span class="pattern-meta">
                         ${isDeleted
                             ? `<span class="deleted-badge">✓ Deleted (${item.deleted_count} emails)</span>`
-                            : `${item.count.toLocaleString()} emails
+                            : `${item.spam_score != null ? `<span class="spam-score spam-${item.spam_score >= 60 ? 'high' : item.spam_score >= 30 ? 'med' : 'low'}">${Math.round(item.spam_score)}% spam</span> ` : ''}${item.count.toLocaleString()} emails
                                (${formatSize(item.size_bytes)})
                                ${item.unread > 0 ? `- ${item.unread} unread` : ''}
                                ${hasDeleted ? `<span class="partial-deleted">- ${item.deleted_count} deleted</span>` : ''}`

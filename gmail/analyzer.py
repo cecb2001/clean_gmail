@@ -50,7 +50,7 @@ class EmailAnalyzer:
         if progress_callback:
             progress_callback(0, len(message_ids), 'fetching_metadata')
 
-        metadata_headers = ['From', 'To', 'Subject', 'Date', 'List-Unsubscribe']
+        metadata_headers = ['From', 'To', 'Subject', 'Date', 'List-Unsubscribe', 'List-Unsubscribe-Post']
         batch_size = 100
 
         for i in range(0, len(message_ids), batch_size):
@@ -115,6 +115,7 @@ class EmailAnalyzer:
             'date': date,
             'age_days': age_days,
             'has_unsubscribe': 'list-unsubscribe' in headers,
+            'has_list_unsubscribe_post': 'list-unsubscribe-post' in headers,
             'is_unread': 'UNREAD' in msg.get('labelIds', []),
         }
 
@@ -145,7 +146,10 @@ class EmailAnalyzer:
 
     def _group_by_sender_domain(self):
         """Group emails by sender domain."""
-        groups = defaultdict(lambda: {'count': 0, 'size_bytes': 0, 'emails': [], 'unread': 0})
+        groups = defaultdict(lambda: {
+            'count': 0, 'size_bytes': 0, 'emails': [], 'unread': 0,
+            'newsletter_count': 0, 'promotions_count': 0,
+        })
 
         for email in self._emails:
             domain = email['sender_domain']
@@ -155,8 +159,11 @@ class EmailAnalyzer:
                 groups[domain]['emails'].append(email['id'])
                 if email['is_unread']:
                     groups[domain]['unread'] += 1
+                if email['has_unsubscribe']:
+                    groups[domain]['newsletter_count'] += 1
+                if 'CATEGORY_PROMOTIONS' in email['labels']:
+                    groups[domain]['promotions_count'] += 1
 
-        # Convert to sorted list
         result = []
         for domain, data in groups.items():
             if data['count'] >= config.MIN_PATTERN_COUNT:
@@ -168,13 +175,18 @@ class EmailAnalyzer:
                     'size_bytes': data['size_bytes'],
                     'unread': data['unread'],
                     'email_ids': data['emails'],
+                    'newsletter_count': data['newsletter_count'],
+                    'promotions_count': data['promotions_count'],
                 })
 
-        return sorted(result, key=lambda x: x['size_bytes'], reverse=True)
+        return self._sort_by_spam_score(result)
 
     def _group_by_sender_email(self):
         """Group emails by exact sender email."""
-        groups = defaultdict(lambda: {'count': 0, 'size_bytes': 0, 'emails': [], 'unread': 0, 'name': ''})
+        groups = defaultdict(lambda: {
+            'count': 0, 'size_bytes': 0, 'emails': [], 'unread': 0, 'name': '',
+            'newsletter_count': 0, 'promotions_count': 0,
+        })
 
         for email in self._emails:
             sender = email['sender_email']
@@ -186,6 +198,10 @@ class EmailAnalyzer:
                     groups[sender]['unread'] += 1
                 if not groups[sender]['name'] and email['sender_name']:
                     groups[sender]['name'] = email['sender_name']
+                if email['has_unsubscribe']:
+                    groups[sender]['newsletter_count'] += 1
+                if 'CATEGORY_PROMOTIONS' in email['labels']:
+                    groups[sender]['promotions_count'] += 1
 
         result = []
         for sender, data in groups.items():
@@ -198,9 +214,42 @@ class EmailAnalyzer:
                     'size_bytes': data['size_bytes'],
                     'unread': data['unread'],
                     'email_ids': data['emails'],
+                    'newsletter_count': data['newsletter_count'],
+                    'promotions_count': data['promotions_count'],
                 })
 
-        return sorted(result, key=lambda x: x['size_bytes'], reverse=True)
+        return self._sort_by_spam_score(result)
+
+    def _sort_by_spam_score(self, patterns):
+        """Compute a spam-likelihood score for each pattern and sort descending.
+
+        Score (0-100) is a weighted composite of:
+          - 35%: unread ratio (high unread = likely ignored/unwanted)
+          - 25%: newsletter ratio (has List-Unsubscribe header = marketing)
+          - 20%: promotions ratio (Gmail classified as promotions)
+          - 20%: volume score (high count relative to top sender)
+        """
+        if not patterns:
+            return patterns
+
+        max_count = max(p['count'] for p in patterns)
+
+        for p in patterns:
+            count = p['count']
+            unread_ratio = p['unread'] / count if count else 0
+            newsletter_ratio = p.get('newsletter_count', 0) / count if count else 0
+            promotions_ratio = p.get('promotions_count', 0) / count if count else 0
+            volume_score = min(count / max_count, 1.0) if max_count else 0
+
+            p['spam_score'] = round(
+                35 * unread_ratio
+                + 25 * newsletter_ratio
+                + 20 * promotions_ratio
+                + 20 * volume_score,
+                1,
+            )
+
+        return sorted(patterns, key=lambda x: x['spam_score'], reverse=True)
 
     def _group_by_category(self):
         """Group emails by Gmail categories."""
@@ -353,6 +402,21 @@ class EmailAnalyzer:
             'newsletter_count': newsletters,
             'top_senders': [{'domain': d, 'count': c} for d, c in top_senders],
         }
+
+    def build_email_index(self):
+        """Build lightweight per-email index for rule matching."""
+        index = {}
+        for email in self._emails:
+            index[email['id']] = {
+                'se': email['sender_email'],
+                'sd': email['sender_domain'],
+                'ad': email['age_days'],
+                'sb': email['size_bytes'],
+                'ur': email['is_unread'],
+                'hu': email['has_unsubscribe'],
+                'lb': email['labels'],
+            }
+        return index
 
     def _empty_analysis(self):
         """Return empty analysis structure."""
