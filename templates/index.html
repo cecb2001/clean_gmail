@@ -36,6 +36,18 @@
             <p>Review items in your trash and permanently delete them to reclaim storage space.</p>
             <a href="{{ url_for('trash') }}" class="btn btn-secondary">Review Trash</a>
         </div>
+
+        <div class="action-card">
+            <h3>Smart Rules</h3>
+            <p>Create cleanup rules to automatically delete emails matching specific criteria.</p>
+            <a href="{{ url_for('rules_page') }}" class="btn btn-primary">Manage Rules</a>
+        </div>
+
+        <div class="action-card">
+            <h3>Unsubscribe</h3>
+            <p>Find and unsubscribe from newsletters and mailing lists you no longer read.</p>
+            <a href="{{ url_for('unsubscribe_page') }}" class="btn btn-primary">Manage Subscriptions</a>
+        </div>
     </div>
 
     <div class="safety-note">

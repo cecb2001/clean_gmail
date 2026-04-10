@@ -366,6 +366,73 @@ a:hover {
     font-weight: 500;
 }
 
+.sort-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.sort-label {
+    font-size: 0.85rem;
+    color: #666;
+    font-weight: 500;
+    margin-right: 0.25rem;
+}
+
+.sort-chip {
+    padding: 0.25rem 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 16px;
+    background: #fff;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    color: #555;
+}
+
+.sort-chip:hover {
+    border-color: #1a73e8;
+    color: #1a73e8;
+}
+
+.sort-chip.active {
+    background: #1a73e8;
+    color: #fff;
+    border-color: #1a73e8;
+}
+
+.sort-separator {
+    color: #ccc;
+    margin: 0 0.25rem;
+}
+
+.show-dismissed-toggle {
+    font-size: 0.8rem;
+    color: #888;
+    cursor: pointer;
+}
+
+.show-dismissed-toggle:hover {
+    color: #1a73e8;
+}
+
+.pattern-item.kept {
+    border-color: #4caf50;
+    background: #f1f8e9;
+}
+
+.pattern-item.dismissed {
+    opacity: 0.5;
+}
+
+.btn-kept {
+    background: #4caf50;
+    color: #fff;
+    border-color: #4caf50;
+}
+
 .spam-score {
     display: inline-block;
     padding: 1px 6px;

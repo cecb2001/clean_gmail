@@ -11,8 +11,11 @@ client_secret*.json
 *.env
 .envrc
 
-# Cache files
+# Cache and data files
 analysis_cache.json
+email_index.json
+rules.json
+unsubscribe_tracking.json
 *.cache
 .cache/
 

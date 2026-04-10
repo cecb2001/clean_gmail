@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% block title %}Unsubscribe Manager - Gmail Cleanup{% endblock %}
+
+{% block content %}
+<div class="unsubscribe-page">
+    <h1>Unsubscribe Manager</h1>
+    <p class="help-text">Automatically unsubscribe from newsletters and mailing lists you no longer read.</p>
+
+    <div class="unsub-tabs">
+        <button class="tab-btn active" onclick="switchUnsubTab('suggestions')">Suggestions</button>
+        <button class="tab-btn" onclick="switchUnsubTab('history')">History</button>
+    </div>
+
+    <!-- Suggestions Tab -->
+    <div id="suggestionsTab">
+        <div class="unsub-controls">
+            <button class="btn btn-primary" id="loadSuggestionsBtn" onclick="loadSuggestions()">Find Unsubscribe Suggestions</button>
+            <button class="btn btn-danger" id="batchUnsubBtn" style="display:none;" onclick="startBatchUnsub()">Unsubscribe Selected (<span id="selectedUnsubCount">0</span>)</button>
+        </div>
+
+        <div id="suggestionsLoading" style="display: none;">
+            <div class="spinner-container"><div class="spinner"></div><p>Analyzing your inbox for unsubscribe suggestions...</p></div>
+        </div>
+
+        <div id="suggestionsList" class="suggestions-list"></div>
+    </div>
+
+    <!-- History Tab -->
+    <div id="historyTab" style="display: none;">
+        <div id="historyList"></div>
+    </div>
+
+    <!-- Batch Progress -->
+    <div id="batchProgress" class="progress-container" style="display: none;">
+        <h3>Batch Unsubscribe</h3>
+        <div class="progress-bar">
+            <div class="progress-fill" id="batchProgressFill"></div>
+        </div>
+        <p id="batchProgressText">Starting...</p>
+        <div id="batchDetails" class="batch-details"></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let suggestions = [];
+    let selectedSenders = new Set();
+
+    function switchUnsubTab(tab) {
+        document.querySelectorAll('.unsub-tabs .tab-btn').forEach((btn, i) => {
+            btn.classList.toggle('active', (tab === 'suggestions' && i === 0) || (tab === 'history' && i === 1));
+        });
+        document.getElementById('suggestionsTab').style.display = tab === 'suggestions' ? 'block' : 'none';
+        document.getElementById('historyTab').style.display = tab === 'history' ? 'block' : 'none';
+
+        if (tab === 'history') loadHistory();
+    }
+
+    async function loadSuggestions() {
+        document.getElementById('suggestionsLoading').style.display = 'block';
+        document.getElementById('suggestionsList').innerHTML = '';
+        document.getElementById('loadSuggestionsBtn').disabled = true;
+
+        try {
+            const resp = await fetch('/api/unsubscribe/suggestions');
+            const data = await resp.json();
+
+            document.getElementById('suggestionsLoading').style.display = 'none';
+            document.getElementById('loadSuggestionsBtn').disabled = false;
+
+            if (data.error) {
+                document.getElementById('suggestionsList').innerHTML = `<p class="error">${data.error}</p>`;
+                return;
+            }
+
+            suggestions = data.suggestions || [];
+            displaySuggestions();
+        } catch (e) {
+            document.getElementById('suggestionsLoading').style.display = 'none';
+            document.getElementById('loadSuggestionsBtn').disabled = false;
+            document.getElementById('suggestionsList').innerHTML = `<p class="error">${e.message}</p>`;
+        }
+    }
+
+    function displaySuggestions() {
+        const list = document.getElementById('suggestionsList');
+
+        if (suggestions.length === 0) {
+            list.innerHTML = '<p class="no-data">No unsubscribe suggestions found. Run an analysis first, or all your newsletters are already being read.</p>';
+            return;
+        }
+
+        list.innerHTML = suggestions.map((s, i) => {
+            const scoreClass = s.score >= 40 ? 'score-high' : s.score >= 20 ? 'score-medium' : 'score-low';
+            const unreadPct = Math.round(s.unread_ratio * 100);
+
+            return `
+            <div class="suggestion-card ${selectedSenders.has(s.sender_email) ? 'selected' : ''}" data-sender="${escapeAttr(s.sender_email)}">
+                <div class="suggestion-select">
+                    <input type="checkbox" class="unsub-checkbox"
+                           ${selectedSenders.has(s.sender_email) ? 'checked' : ''}
+                           onchange="toggleSenderSelection('${escapeAttr(s.sender_email)}')">
+                </div>
+                <div class="suggestion-info">
+                    <div class="suggestion-name">${escapeHtml(s.display_name)}</div>
+                    <div class="suggestion-meta">
+                        ${s.email_count.toLocaleString()} emails | ${s.unread_count.toLocaleString()} unread (${unreadPct}%) | ${formatSize(s.size_bytes)}
+                    </div>
+                    <div class="suggestion-reasons">
+                        ${s.reasons.map(r => `<span class="reason-tag">${escapeHtml(r)}</span>`).join('')}
+                    </div>
+                </div>
+                <div class="suggestion-score">
+                    <div class="score-indicator ${scoreClass}">${s.score}</div>
+                </div>
+                <div class="suggestion-actions">
+                    <button class="btn btn-sm btn-unsubscribe-action" onclick="event.stopPropagation(); unsubscribeSingle('${escapeAttr(s.sender_email)}', '${escapeAttr(s.display_name)}', this)">
+                        Unsubscribe
+                    </button>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    function toggleSenderSelection(senderEmail) {
+        if (selectedSenders.has(senderEmail)) {
+            selectedSenders.delete(senderEmail);
+        } else {
+            selectedSenders.add(senderEmail);
+        }
+        updateBatchButton();
+
+        const card = document.querySelector(`.suggestion-card[data-sender="${CSS.escape(senderEmail)}"]`);
+        if (card) card.classList.toggle('selected', selectedSenders.has(senderEmail));
+    }
+
+    function updateBatchButton() {
+        const btn = document.getElementById('batchUnsubBtn');
+        const count = selectedSenders.size;
+        document.getElementById('selectedUnsubCount').textContent = count;
+        btn.style.display = count > 0 ? 'inline-block' : 'none';
+    }
+
+    async function unsubscribeSingle(senderEmail, displayName, btn) {
+        const originalText = btn.textContent;
+        btn.textContent = 'Processing...';
+        btn.disabled = true;
+
+        try {
+            const resp = await fetch('/api/unsubscribe/execute', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({sender_email: senderEmail, display_name: displayName})
+            });
+            const result = await resp.json();
+
+            if (result.status === 'unknown' || result.status === 'success') {
+                btn.textContent = 'Done';
+                btn.className = 'btn btn-sm btn-success-static';
+                const card = btn.closest('.suggestion-card');
+                if (card) card.classList.add('unsub-done');
+            } else {
+                btn.textContent = 'Failed';
+                btn.disabled = false;
+                if (result.error) {
+                    alert(`Unsubscribe failed: ${result.error}\n\nTry opening the unsubscribe link manually in your browser.`);
+                }
+                setTimeout(() => { btn.textContent = originalText; }, 3000);
+            }
+        } catch (e) {
+            btn.textContent = originalText;
+            btn.disabled = false;
+            alert('Error: ' + e.message);
+        }
+    }
+
+    async function startBatchUnsub() {
+        if (selectedSenders.size === 0) return;
+        if (!confirm(`Unsubscribe from ${selectedSenders.size} senders?`)) return;
+
+        const senders = [];
+        selectedSenders.forEach(email => {
+            const s = suggestions.find(x => x.sender_email === email);
+            senders.push({sender_email: email, display_name: s ? s.display_name : email});
+        });
+
+        document.getElementById('batchProgress').style.display = 'block';
+        document.getElementById('batchProgressFill').style.width = '0%';
+        document.getElementById('batchProgressText').textContent = 'Starting...';
+        document.getElementById('batchDetails').innerHTML = '';
+
+        try {
+            const resp = await fetch('/api/unsubscribe/batch/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({senders})
+            });
+            const start = await resp.json();
+            if (start.error) { alert(start.error); return; }
+
+            while (true) {
+                await new Promise(r => setTimeout(r, 1000));
+                const pr = await fetch('/api/unsubscribe/batch/progress');
+                const pd = await pr.json();
+
+                if (pd.status === 'error') {
+                    document.getElementById('batchProgressText').textContent = 'Error: ' + pd.error;
+                    break;
+                }
+                if (pd.status === 'complete') {
+                    const r = pd.result;
+                    document.getElementById('batchProgressFill').style.width = '100%';
+                    document.getElementById('batchProgressText').textContent = `Done! ${r.success} unsubscribed, ${r.failed} failed`;
+                    displayBatchDetails(r.details);
+                    await fetch('/api/unsubscribe/batch/reset', {method: 'POST'});
+                    selectedSenders.clear();
+                    updateBatchButton();
+                    loadSuggestions();
+                    break;
+                }
+                if (pd.status === 'running' && pd.progress) {
+                    const p = pd.progress;
+                    const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+                    document.getElementById('batchProgressFill').style.width = pct + '%';
+                    document.getElementById('batchProgressText').textContent = p.message;
+                    if (p.details) displayBatchDetails(p.details);
+                }
+            }
+        } catch (e) {
+            document.getElementById('batchProgressText').textContent = 'Error: ' + e.message;
+        }
+    }
+
+    function displayBatchDetails(details) {
+        if (!details || details.length === 0) return;
+        const container = document.getElementById('batchDetails');
+        container.innerHTML = details.map(d => {
+            const statusClass = (d.status === 'success' || d.status === 'unknown') ? 'status-success' : 'status-failed';
+            const statusText = d.status === 'unknown' ? 'sent' : d.status;
+            return `<div class="batch-detail-item">
+                <span class="batch-sender">${escapeHtml(d.display_name || d.sender_email)}</span>
+                <span class="status-badge ${statusClass}">${statusText}</span>
+                ${d.method ? `<span class="method-tag">${d.method}</span>` : ''}
+            </div>`;
+        }).join('');
+    }
+
+    async function loadHistory() {
+        const list = document.getElementById('historyList');
+        list.innerHTML = '<p class="no-data">Loading...</p>';
+
+        try {
+            const resp = await fetch('/api/unsubscribe/history');
+            const data = await resp.json();
+            const history = data.history || [];
+
+            if (history.length === 0) {
+                list.innerHTML = '<p class="no-data">No unsubscribe history yet.</p>';
+                return;
+            }
+
+            list.innerHTML = `
+            <table class="email-table">
+                <thead><tr><th>Sender</th><th>Method</th><th>Status</th><th>Date</th></tr></thead>
+                <tbody>
+                ${history.map(h => {
+                    const statusClass = (h.status === 'success' || h.status === 'unknown') ? 'status-success' : 'status-failed';
+                    const statusText = h.status === 'unknown' ? 'sent' : h.status;
+                    return `<tr>
+                        <td>${escapeHtml(h.display_name || h.sender_email)}</td>
+                        <td><span class="method-tag">${h.method || 'N/A'}</span></td>
+                        <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                        <td class="email-date">${h.attempted_at ? new Date(h.attempted_at).toLocaleString() : ''}</td>
+                    </tr>`;
+                }).join('')}
+                </tbody>
+            </table>`;
+        } catch (e) {
+            list.innerHTML = `<p class="error">${e.message}</p>`;
+        }
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function escapeAttr(text) {
+        if (!text) return '';
+        return text.replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+</script>
+{% endblock %}

@@ -119,7 +119,7 @@ class EmailAnalyzer:
             'is_unread': 'UNREAD' in msg.get('labelIds', []),
         }
 
-    def analyze(self):
+    def analyze(self, user_actions=None, unsubscribe_tracking=None):
         """Perform pattern analysis on fetched emails."""
         if self._analysis_cache:
             return self._analysis_cache
@@ -127,12 +127,20 @@ class EmailAnalyzer:
         if not self._emails:
             return self._empty_analysis()
 
+        # Build set of unsubscribed sender emails for scoring
+        unsubscribed_senders = set()
+        if unsubscribe_tracking:
+            for entry in unsubscribe_tracking.get('unsubscribed', []):
+                if entry.get('status') in ('success', 'unknown'):
+                    unsubscribed_senders.add(entry.get('sender_email', ''))
+                    unsubscribed_senders.add(entry.get('sender_domain', ''))
+
         analysis = {
             'total_emails': len(self._emails),
             'total_size_bytes': sum(e['size_bytes'] for e in self._emails),
             'patterns': {
-                'by_sender_domain': self._group_by_sender_domain(),
-                'by_sender_email': self._group_by_sender_email(),
+                'by_sender_domain': self._group_by_sender_domain(user_actions, unsubscribed_senders),
+                'by_sender_email': self._group_by_sender_email(user_actions, unsubscribed_senders),
                 'by_category': self._group_by_category(),
                 'by_age': self._group_by_age(),
                 'by_size': self._group_by_size(),
@@ -144,7 +152,7 @@ class EmailAnalyzer:
         self._analysis_cache = analysis
         return analysis
 
-    def _group_by_sender_domain(self):
+    def _group_by_sender_domain(self, user_actions=None, unsubscribed_senders=None):
         """Group emails by sender domain."""
         groups = defaultdict(lambda: {
             'count': 0, 'size_bytes': 0, 'emails': [], 'unread': 0,
@@ -179,9 +187,9 @@ class EmailAnalyzer:
                     'promotions_count': data['promotions_count'],
                 })
 
-        return self._sort_by_spam_score(result)
+        return self._sort_by_spam_score(result, user_actions, unsubscribed_senders)
 
-    def _group_by_sender_email(self):
+    def _group_by_sender_email(self, user_actions=None, unsubscribed_senders=None):
         """Group emails by exact sender email."""
         groups = defaultdict(lambda: {
             'count': 0, 'size_bytes': 0, 'emails': [], 'unread': 0, 'name': '',
@@ -218,19 +226,31 @@ class EmailAnalyzer:
                     'promotions_count': data['promotions_count'],
                 })
 
-        return self._sort_by_spam_score(result)
+        return self._sort_by_spam_score(result, user_actions, unsubscribed_senders)
 
-    def _sort_by_spam_score(self, patterns):
+    def _sort_by_spam_score(self, patterns, user_actions=None, unsubscribed_senders=None):
         """Compute a spam-likelihood score for each pattern and sort descending.
 
-        Score (0-100) is a weighted composite of:
+        Base score (0-100) is a weighted composite of:
           - 35%: unread ratio (high unread = likely ignored/unwanted)
           - 25%: newsletter ratio (has List-Unsubscribe header = marketing)
           - 20%: promotions ratio (Gmail classified as promotions)
           - 20%: volume score (high count relative to top sender)
+
+        User action adjustments:
+          - Previously deleted sender: +15
+          - Previously unsubscribed sender: +10
+          - Dismissed pattern: -20
+          - Kept pattern: -15
         """
         if not patterns:
             return patterns
+
+        user_actions = user_actions or {}
+        unsubscribed = unsubscribed_senders or set()
+        deleted = user_actions.get('deleted', {})
+        dismissed = user_actions.get('dismissed', {})
+        kept = user_actions.get('kept', {})
 
         max_count = max(p['count'] for p in patterns)
 
@@ -241,13 +261,26 @@ class EmailAnalyzer:
             promotions_ratio = p.get('promotions_count', 0) / count if count else 0
             volume_score = min(count / max_count, 1.0) if max_count else 0
 
-            p['spam_score'] = round(
+            base_score = (
                 35 * unread_ratio
                 + 25 * newsletter_ratio
                 + 20 * promotions_ratio
-                + 20 * volume_score,
-                1,
+                + 20 * volume_score
             )
+
+            # Apply user action adjustments
+            action_key = f"{p['type']}:{p['key']}"
+            adjustment = 0
+            if action_key in deleted:
+                adjustment += 15
+            if p['key'] in unsubscribed:
+                adjustment += 10
+            if action_key in dismissed:
+                adjustment -= 20
+            if action_key in kept:
+                adjustment -= 15
+
+            p['spam_score'] = round(max(0.0, min(100.0, base_score + adjustment)), 1)
 
         return sorted(patterns, key=lambda x: x['spam_score'], reverse=True)
 
@@ -404,19 +437,45 @@ class EmailAnalyzer:
         }
 
     def build_email_index(self):
-        """Build lightweight per-email index for rule matching."""
+        """Build per-email index with enough data to reconstruct for incremental analysis."""
         index = {}
         for email in self._emails:
             index[email['id']] = {
                 'se': email['sender_email'],
                 'sd': email['sender_domain'],
-                'ad': email['age_days'],
+                'sn': email['sender_name'],
+                'dt': int(email['date'].timestamp()),
                 'sb': email['size_bytes'],
                 'ur': email['is_unread'],
                 'hu': email['has_unsubscribe'],
+                'hp': email['has_list_unsubscribe_post'],
                 'lb': email['labels'],
             }
         return index
+
+    def reconstruct_email_from_index(self, email_id, entry):
+        """Rebuild email dict from an index entry (avoids re-fetching from Gmail)."""
+        dt = entry.get('dt')
+        if not dt:
+            return None
+        date = datetime.fromtimestamp(dt, tz=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - date).days
+        return {
+            'id': email_id,
+            'thread_id': None,
+            'labels': entry.get('lb', []),
+            'snippet': '',
+            'size_bytes': entry.get('sb', 0),
+            'sender_email': entry.get('se', ''),
+            'sender_name': entry.get('sn', ''),
+            'sender_domain': entry.get('sd', ''),
+            'subject': '',
+            'date': date,
+            'age_days': age_days,
+            'has_unsubscribe': entry.get('hu', False),
+            'has_list_unsubscribe_post': entry.get('hp', False),
+            'is_unread': entry.get('ur', False),
+        }
 
     def _empty_analysis(self):
         """Return empty analysis structure."""

@@ -461,7 +461,8 @@ class GmailClient:
         result = {
             'header_links': [],
             'body_links': [],
-            'mailto': None
+            'mailto': None,
+            'list_unsubscribe_post': headers.get('list-unsubscribe-post', ''),
         }
 
         # Extract from List-Unsubscribe header
@@ -573,3 +574,17 @@ class GmailClient:
         except Exception as e:
             print(f"[Unsubscribe] Error finding unsubscribe for {sender_email}: {e}", flush=True)
             return None
+
+    def send_unsubscribe_email(self, to_address, subject='unsubscribe', body='unsubscribe'):
+        """Send an unsubscribe email via Gmail API for mailto: links."""
+        import base64
+        from email.mime.text import MIMEText
+
+        message = MIMEText(body)
+        message['to'] = to_address
+        message['subject'] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+        return self.service.users().messages().send(
+            userId='me', body={'raw': raw}
+        ).execute()

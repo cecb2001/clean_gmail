@@ -30,6 +30,7 @@
             <div class="progress-fill" id="progressFill"></div>
         </div>
         <p id="progressText">Starting analysis...</p>
+        <button id="cancelAnalysisBtn" class="btn btn-secondary btn-sm" onclick="cancelAnalysis()" style="margin-top: 0.5rem;">Cancel</button>
     </div>
 
     <div id="results" class="results-container" style="display: none;">
@@ -48,6 +49,16 @@
                 <button class="tab-btn" data-tab="age">By Age</button>
                 <button class="tab-btn" data-tab="newsletters">Newsletters</button>
                 <button class="tab-btn" data-tab="size">Large Emails</button>
+            </div>
+
+            <div id="sortBar" class="sort-bar" style="display: none;">
+                <span class="sort-label">Sort by:</span>
+                <button class="sort-chip active" data-sort="combined">Spam + Size</button>
+                <button class="sort-chip" data-sort="spam">Spam likelihood</button>
+                <button class="sort-chip" data-sort="size">Space used</button>
+                <button class="sort-chip" data-sort="unread">Unread count</button>
+                <span class="sort-separator">|</span>
+                <a href="#" id="showDismissedToggle" class="show-dismissed-toggle" onclick="event.preventDefault(); toggleShowDismissed();" style="display: none;">Show dismissed</a>
             </div>
 
             <div id="patternList" class="pattern-list"></div>
@@ -215,6 +226,11 @@
     let globalDeleteQueue = new Set();
     let deleteQueueEmailData = new Map(); // Store email metadata for display
 
+    // User action tracking
+    let dismissedKeys = new Set();
+    let keptKeys = new Set();
+    let showDismissed = false;
+
     document.getElementById('analyzeBtn').addEventListener('click', startAnalysis);
     document.getElementById('reviewDeleteBtn').addEventListener('click', goToConfirm);
     document.getElementById('clearQueueBtn').addEventListener('click', clearQueue);
@@ -225,9 +241,45 @@
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
     });
 
-    // Check for cached analysis on page load
+    // Sort controls
+    let currentSort = 'combined';
+    document.querySelectorAll('.sort-chip').forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentSort = btn.dataset.sort;
+            document.querySelectorAll('.sort-chip').forEach(b => b.classList.toggle('active', b.dataset.sort === currentSort));
+            applySortAndDisplay();
+        });
+    });
+
+    // Check for cached analysis and running jobs on page load
     let cachedAnalysisData = null;
-    document.addEventListener('DOMContentLoaded', checkCachedAnalysis);
+    document.addEventListener('DOMContentLoaded', () => {
+        loadUserActions();
+        checkRunningJob();
+        checkCachedAnalysis();
+    });
+
+    async function loadUserActions() {
+        try {
+            const resp = await fetch('/api/user-actions');
+            const data = await resp.json();
+            dismissedKeys = new Set(Object.keys(data.dismissed || {}));
+            keptKeys = new Set(Object.keys(data.kept || {}));
+        } catch (e) { /* ignore */ }
+    }
+
+    async function checkRunningJob() {
+        try {
+            const resp = await fetch('/api/analyze/progress');
+            const data = await resp.json();
+            if (data.status === 'running') {
+                document.getElementById('analyzeBtn').disabled = true;
+                document.getElementById('progress').style.display = 'block';
+                document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+                pollUntilComplete();
+            }
+        } catch (e) { /* ignore */ }
+    }
 
     async function checkCachedAnalysis() {
         try {
@@ -303,7 +355,6 @@
         document.getElementById('progressText').textContent = 'Starting analysis...';
 
         try {
-            // Start the analysis job
             const startResponse = await fetch('/api/analyze/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -312,41 +363,52 @@
 
             const startData = await startResponse.json();
             if (startData.error) {
+                if (startData.error === 'Analysis already running') {
+                    // Attach to the in-flight job instead of erroring
+                    pollUntilComplete();
+                    return;
+                }
                 throw new Error(startData.error);
             }
 
-            // Poll for progress
+            pollUntilComplete();
+        } catch (error) {
+            alert('Analysis failed: ' + error.message);
+            document.getElementById('analyzeBtn').disabled = false;
+            document.getElementById('progress').style.display = 'none';
+        }
+    }
+
+    async function pollUntilComplete() {
+        try {
             while (true) {
-                await new Promise(resolve => setTimeout(resolve, 500)); // Poll every 500ms
+                await new Promise(resolve => setTimeout(resolve, 500));
 
-                const progressResponse = await fetch('/api/analyze/progress');
-                const progressData = await progressResponse.json();
+                const resp = await fetch('/api/analyze/progress');
+                const data = await resp.json();
 
-                if (progressData.status === 'error') {
-                    throw new Error(progressData.error);
+                if (data.status === 'error') {
+                    throw new Error(data.error);
                 }
 
-                if (progressData.status === 'complete') {
-                    analysisData = progressData.data;
-                    displayResults(progressData.data);
+                if (data.status === 'complete') {
+                    analysisData = data.data;
+                    displayResults(data.data);
                     document.getElementById('analyzeBtn').disabled = false;
                     document.getElementById('progress').style.display = 'none';
                     return;
                 }
 
-                if (progressData.status === 'running' && progressData.progress) {
-                    const p = progressData.progress;
-                    // Update progress bar
+                if (data.status === 'running' && data.progress) {
+                    const p = data.progress;
                     if (p.total > 0) {
                         const percent = Math.round((p.current / p.total) * 100);
                         document.getElementById('progressFill').style.width = `${percent}%`;
                     }
-                    // Update progress text
                     document.getElementById('progressText').textContent = p.message || `${p.stage}: ${p.current.toLocaleString()} / ${p.total.toLocaleString()}`;
                 }
 
-                if (progressData.status === 'idle') {
-                    // Job finished but no result? Something went wrong
+                if (data.status === 'idle') {
                     throw new Error('Analysis stopped unexpectedly');
                 }
             }
@@ -355,6 +417,12 @@
             document.getElementById('analyzeBtn').disabled = false;
             document.getElementById('progress').style.display = 'none';
         }
+    }
+
+    async function cancelAnalysis() {
+        await fetch('/api/analyze/reset', { method: 'POST' });
+        document.getElementById('analyzeBtn').disabled = false;
+        document.getElementById('progress').style.display = 'none';
     }
 
     function displayResults(data) {
@@ -427,6 +495,44 @@
                 break;
         }
 
+        // Show sort bar only for tabs with spam_score
+        const hasSortableItems = tab === 'senders';
+        document.getElementById('sortBar').style.display = hasSortableItems ? 'flex' : 'none';
+
+        if (hasSortableItems) {
+            applySortAndDisplay();
+        } else {
+            displayPatternPage(1);
+        }
+    }
+
+    function applySortAndDisplay() {
+        if (!allPatternItems.length) {
+            displayPatternPage(1);
+            return;
+        }
+
+        const maxSize = Math.max(...allPatternItems.map(p => p.size_bytes)) || 1;
+        const maxUnread = Math.max(...allPatternItems.map(p => p.unread)) || 1;
+
+        allPatternItems.sort((a, b) => {
+            switch (currentSort) {
+                case 'combined': {
+                    const aScore = ((a.spam_score || 0) / 100 + a.size_bytes / maxSize) / 2;
+                    const bScore = ((b.spam_score || 0) / 100 + b.size_bytes / maxSize) / 2;
+                    return bScore - aScore;
+                }
+                case 'spam':
+                    return (b.spam_score || 0) - (a.spam_score || 0);
+                case 'size':
+                    return b.size_bytes - a.size_bytes;
+                case 'unread':
+                    return b.unread - a.unread;
+                default:
+                    return 0;
+            }
+        });
+
         displayPatternPage(1);
     }
 
@@ -495,14 +601,27 @@
             return;
         }
 
+        // Update dismissed toggle visibility
+        const dismissedInTab = items.filter(i => dismissedKeys.has(`${i.type}:${i.key}`)).length;
+        const toggle = document.getElementById('showDismissedToggle');
+        if (toggle) {
+            toggle.style.display = dismissedInTab > 0 ? 'inline' : 'none';
+            toggle.textContent = showDismissed ? 'Hide dismissed' : `Show dismissed (${dismissedInTab})`;
+        }
+
         list.innerHTML = items.map(item => {
             const isDeleted = item.count === 0 && item.deleted_count > 0;
             const hasDeleted = item.deleted_count > 0 && item.count > 0;
-            // Show unsubscribe button for sender-related patterns
             const showUnsubscribe = !isDeleted && (item.type === 'sender_domain' || item.type === 'sender_email' || item.type === 'newsletter');
+            const actionKey = `${item.type}:${item.key}`;
+            const isDismissed = dismissedKeys.has(actionKey);
+            const isKept = keptKeys.has(actionKey);
+
+            // Hide dismissed unless toggled on
+            if (isDismissed && !showDismissed) return '';
 
             return `
-            <div class="pattern-item ${deleteQueue.has(item.key) ? 'selected' : ''} ${isDeleted ? 'deleted' : ''}"
+            <div class="pattern-item ${deleteQueue.has(item.key) ? 'selected' : ''} ${isDeleted ? 'deleted' : ''} ${isDismissed ? 'dismissed' : ''} ${isKept ? 'kept' : ''}"
                  data-type="${item.type}"
                  data-key="${escapeAttr(item.key)}">
                 <div class="pattern-info" onclick="${isDeleted ? '' : `openDrilldown('${item.type}', '${escapeAttr(item.key)}')`}">
@@ -521,6 +640,8 @@
                     ${isDeleted ? '' : `
                         ${showUnsubscribe ? `<button class="btn btn-sm btn-unsubscribe-action" onclick="event.stopPropagation(); openUnsubscribe('${escapeAttr(item.key)}', '${escapeAttr(item.display)}')" title="Find unsubscribe link">Unsubscribe</button>` : ''}
                         <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openDrilldown('${item.type}', '${escapeAttr(item.key)}')">View All</button>
+                        <button class="btn btn-sm ${isKept ? 'btn-kept' : ''}" onclick="event.stopPropagation(); keepPattern('${item.type}', '${escapeAttr(item.key)}', this)" title="Mark as important">Keep</button>
+                        <button class="btn btn-sm" onclick="event.stopPropagation(); dismissPattern('${item.type}', '${escapeAttr(item.key)}', this)" title="Dismiss this pattern">Dismiss</button>
                         <input type="checkbox"
                                ${deleteQueue.has(item.key) ? 'checked' : ''}
                                onclick="event.stopPropagation(); togglePattern('${item.type}', '${escapeAttr(item.key)}', ${item.email_ids.length}, ${item.size_bytes})">
@@ -528,6 +649,39 @@
                 </div>
             </div>
         `}).join('');
+    }
+
+    async function dismissPattern(type, key, btn) {
+        const actionKey = `${type}:${key}`;
+        await fetch(`/api/patterns/${type}/${encodeURIComponent(key)}/dismiss`, { method: 'POST' });
+        dismissedKeys.add(actionKey);
+        keptKeys.delete(actionKey);
+        if (!showDismissed) {
+            const item = btn.closest('.pattern-item');
+            if (item) item.style.display = 'none';
+        }
+        // Update toggle count
+        displayPatternPage(patternPage);
+        showToast('Pattern dismissed');
+    }
+
+    async function keepPattern(type, key, btn) {
+        const actionKey = `${type}:${key}`;
+        await fetch(`/api/patterns/${type}/${encodeURIComponent(key)}/keep`, { method: 'POST' });
+        keptKeys.add(actionKey);
+        dismissedKeys.delete(actionKey);
+        const item = btn.closest('.pattern-item');
+        if (item) {
+            item.classList.add('kept');
+            item.classList.remove('dismissed');
+        }
+        btn.classList.add('btn-kept');
+        showToast('Marked as important');
+    }
+
+    function toggleShowDismissed() {
+        showDismissed = !showDismissed;
+        displayPatternPage(patternPage);
     }
 
     // ========== Drill-down View ==========

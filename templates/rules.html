@@ -1,0 +1,432 @@
+{% extends "base.html" %}
+
+{% block title %}Smart Rules - Gmail Cleanup{% endblock %}
+
+{% block content %}
+<div class="rules-page">
+    <div class="page-header">
+        <h1>Smart Cleanup Rules</h1>
+        <button class="btn btn-primary" onclick="openCreateModal()">Create Rule</button>
+    </div>
+
+    <p class="help-text">Define rules to automatically find and delete emails matching specific criteria. Rules are saved for reuse.</p>
+
+    <div id="rulesList" class="rules-list">
+        <p class="no-data">Loading rules...</p>
+    </div>
+
+    <!-- Create/Edit Rule Modal -->
+    <div id="ruleModal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3 id="ruleModalTitle">Create Rule</h3>
+                <button class="modal-close" onclick="closeRuleModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="rule-form">
+                    <div class="control-group">
+                        <label for="ruleName">Rule Name</label>
+                        <input type="text" id="ruleName" placeholder="e.g., Clean old promotions">
+                    </div>
+                    <div class="control-group">
+                        <label for="ruleDescription">Description (optional)</label>
+                        <input type="text" id="ruleDescription" placeholder="e.g., Delete promotions older than 30 days">
+                    </div>
+
+                    <div class="conditions-section">
+                        <div class="conditions-header">
+                            <label>Conditions</label>
+                            <div class="logic-toggle">
+                                <label><input type="radio" name="conditionLogic" value="AND" checked> Match ALL</label>
+                                <label><input type="radio" name="conditionLogic" value="OR"> Match ANY</label>
+                            </div>
+                        </div>
+                        <div id="conditionRows"></div>
+                        <button class="btn btn-sm btn-secondary" onclick="addConditionRow()">+ Add Condition</button>
+                    </div>
+
+                    <div class="control-group">
+                        <label>Action</label>
+                        <div class="action-options">
+                            <label class="action-option">
+                                <input type="radio" name="ruleAction" value="trash" checked>
+                                <span>Move to Trash</span>
+                                <small>Recoverable for 30 days</small>
+                            </label>
+                            <label class="action-option">
+                                <input type="radio" name="ruleAction" value="delete">
+                                <span>Permanently Delete</span>
+                                <small>Cannot be undone</small>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-buttons">
+                    <button class="btn btn-secondary" onclick="closeRuleModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveRule()">Save Rule</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Preview Modal -->
+    <div id="previewModal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h3>Rule Preview</h3>
+                <button class="modal-close" onclick="closePreviewModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="previewBody">
+                <div class="spinner-container"><div class="spinner"></div><p>Matching emails...</p></div>
+            </div>
+            <div class="modal-footer">
+                <div class="modal-buttons">
+                    <button class="btn btn-secondary" onclick="closePreviewModal()">Close</button>
+                    <button class="btn btn-danger" id="previewExecuteBtn" style="display:none;" onclick="executeFromPreview()">Execute Rule</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Execution Progress -->
+    <div id="executionProgress" class="progress-container" style="display: none;">
+        <h3 id="executionTitle">Executing Rule...</h3>
+        <div class="progress-bar">
+            <div class="progress-fill" id="execProgressFill"></div>
+        </div>
+        <p id="execProgressText">Starting...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let editingRuleId = null;
+    let previewRuleId = null;
+
+    const FIELD_OPTIONS = {
+        category: {label: 'Category', operators: ['eq', 'neq'], values: [
+            {value: 'CATEGORY_PROMOTIONS', label: 'Promotions'},
+            {value: 'CATEGORY_SOCIAL', label: 'Social'},
+            {value: 'CATEGORY_UPDATES', label: 'Updates'},
+            {value: 'CATEGORY_FORUMS', label: 'Forums'},
+        ]},
+        sender_domain: {label: 'Sender Domain', operators: ['eq', 'neq', 'contains'], values: null},
+        sender_email: {label: 'Sender Email', operators: ['eq', 'neq', 'contains'], values: null},
+        age_days: {label: 'Age (days)', operators: ['gte', 'lte', 'eq'], values: null, type: 'number'},
+        size_bytes: {label: 'Size (bytes)', operators: ['gte', 'lte'], values: null, type: 'number'},
+        is_unread: {label: 'Unread', operators: ['eq'], values: [{value: 'true', label: 'Yes'}, {value: 'false', label: 'No'}]},
+        has_unsubscribe: {label: 'Has Unsubscribe', operators: ['eq'], values: [{value: 'true', label: 'Yes'}, {value: 'false', label: 'No'}]},
+    };
+
+    const OPERATOR_LABELS = {eq: 'equals', neq: 'not equals', contains: 'contains', gte: 'at least', lte: 'at most', 'in': 'in'};
+
+    document.addEventListener('DOMContentLoaded', loadRules);
+
+    async function loadRules() {
+        try {
+            const resp = await fetch('/api/rules');
+            const data = await resp.json();
+            displayRules(data.rules || []);
+        } catch (e) {
+            document.getElementById('rulesList').innerHTML = `<p class="error">Failed to load rules: ${e.message}</p>`;
+        }
+    }
+
+    function displayRules(rules) {
+        const list = document.getElementById('rulesList');
+        if (rules.length === 0) {
+            list.innerHTML = '<p class="no-data">No rules created yet. Click "Create Rule" to get started.</p>';
+            return;
+        }
+
+        list.innerHTML = rules.map(rule => {
+            const condText = rule.conditions.map(c => {
+                const f = FIELD_OPTIONS[c.field];
+                const fieldLabel = f ? f.label : c.field;
+                const opLabel = OPERATOR_LABELS[c.operator] || c.operator;
+                let valLabel = c.value;
+                if (f && f.values) {
+                    const found = f.values.find(v => v.value === String(c.value));
+                    if (found) valLabel = found.label;
+                }
+                return `${fieldLabel} ${opLabel} ${valLabel}`;
+            }).join(` ${rule.condition_logic} `);
+
+            const actionBadge = rule.action === 'delete'
+                ? '<span class="action-badge action-delete">Permanent Delete</span>'
+                : '<span class="action-badge action-trash">Move to Trash</span>';
+
+            const lastRun = rule.last_run
+                ? `<span class="rule-last-run">Last run: ${new Date(rule.last_run).toLocaleString()} (${rule.last_run_result?.success || 0} deleted)</span>`
+                : '';
+
+            return `
+            <div class="rule-card" data-rule-id="${rule.id}">
+                <div class="rule-info">
+                    <div class="rule-name">${escapeHtml(rule.name)} ${actionBadge}</div>
+                    <div class="rule-conditions">${escapeHtml(condText)}</div>
+                    ${rule.description ? `<div class="rule-description">${escapeHtml(rule.description)}</div>` : ''}
+                    ${lastRun}
+                </div>
+                <div class="rule-actions">
+                    <button class="btn btn-sm btn-primary" onclick="previewRule('${rule.id}')">Preview</button>
+                    <button class="btn btn-sm btn-danger" onclick="executeRule('${rule.id}')">Run</button>
+                    <button class="btn btn-sm btn-secondary" onclick="editRule('${rule.id}')">Edit</button>
+                    <button class="btn btn-sm btn-secondary" onclick="deleteRule('${rule.id}')">Delete</button>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    function addConditionRow(field = '', operator = '', value = '') {
+        const rows = document.getElementById('conditionRows');
+        const idx = rows.children.length;
+
+        const fieldSelect = Object.entries(FIELD_OPTIONS).map(([k, v]) =>
+            `<option value="${k}" ${k === field ? 'selected' : ''}>${v.label}</option>`
+        ).join('');
+
+        const row = document.createElement('div');
+        row.className = 'condition-row';
+        row.innerHTML = `
+            <select class="cond-field" onchange="onFieldChange(this)">
+                <option value="">Select field...</option>
+                ${fieldSelect}
+            </select>
+            <select class="cond-operator"></select>
+            <span class="cond-value-container"></span>
+            <button class="btn btn-sm btn-secondary" onclick="this.parentElement.remove()">&times;</button>
+        `;
+        rows.appendChild(row);
+
+        if (field) {
+            row.querySelector('.cond-field').value = field;
+            onFieldChange(row.querySelector('.cond-field'));
+            if (operator) row.querySelector('.cond-operator').value = operator;
+            if (value !== '') {
+                const valEl = row.querySelector('.cond-value-container select, .cond-value-container input');
+                if (valEl) valEl.value = value;
+            }
+        }
+    }
+
+    function onFieldChange(select) {
+        const row = select.closest('.condition-row');
+        const field = select.value;
+        const opSelect = row.querySelector('.cond-operator');
+        const valContainer = row.querySelector('.cond-value-container');
+
+        opSelect.innerHTML = '';
+        valContainer.innerHTML = '';
+
+        if (!field || !FIELD_OPTIONS[field]) return;
+
+        const opts = FIELD_OPTIONS[field];
+        opts.operators.forEach(op => {
+            opSelect.innerHTML += `<option value="${op}">${OPERATOR_LABELS[op]}</option>`;
+        });
+
+        if (opts.values) {
+            let html = '<select class="cond-value">';
+            opts.values.forEach(v => {
+                html += `<option value="${v.value}">${v.label}</option>`;
+            });
+            html += '</select>';
+            valContainer.innerHTML = html;
+        } else {
+            const inputType = opts.type === 'number' ? 'number' : 'text';
+            const placeholder = field === 'age_days' ? 'e.g., 30' : field === 'size_bytes' ? 'e.g., 1048576' : 'e.g., example.com';
+            valContainer.innerHTML = `<input type="${inputType}" class="cond-value" placeholder="${placeholder}">`;
+        }
+    }
+
+    function openCreateModal() {
+        editingRuleId = null;
+        document.getElementById('ruleModalTitle').textContent = 'Create Rule';
+        document.getElementById('ruleName').value = '';
+        document.getElementById('ruleDescription').value = '';
+        document.getElementById('conditionRows').innerHTML = '';
+        document.querySelector('input[name="conditionLogic"][value="AND"]').checked = true;
+        document.querySelector('input[name="ruleAction"][value="trash"]').checked = true;
+        addConditionRow();
+        document.getElementById('ruleModal').style.display = 'flex';
+    }
+
+    async function editRule(ruleId) {
+        try {
+            const resp = await fetch('/api/rules');
+            const data = await resp.json();
+            const rule = (data.rules || []).find(r => r.id === ruleId);
+            if (!rule) { alert('Rule not found'); return; }
+
+            editingRuleId = ruleId;
+            document.getElementById('ruleModalTitle').textContent = 'Edit Rule';
+            document.getElementById('ruleName').value = rule.name;
+            document.getElementById('ruleDescription').value = rule.description || '';
+            document.getElementById('conditionRows').innerHTML = '';
+            document.querySelector(`input[name="conditionLogic"][value="${rule.condition_logic}"]`).checked = true;
+            document.querySelector(`input[name="ruleAction"][value="${rule.action}"]`).checked = true;
+
+            rule.conditions.forEach(c => addConditionRow(c.field, c.operator, c.value));
+            document.getElementById('ruleModal').style.display = 'flex';
+        } catch (e) { alert('Error: ' + e.message); }
+    }
+
+    function closeRuleModal() { document.getElementById('ruleModal').style.display = 'none'; }
+
+    function collectFormData() {
+        const name = document.getElementById('ruleName').value.trim();
+        const description = document.getElementById('ruleDescription').value.trim();
+        const conditionLogic = document.querySelector('input[name="conditionLogic"]:checked').value;
+        const action = document.querySelector('input[name="ruleAction"]:checked').value;
+
+        const conditions = [];
+        document.querySelectorAll('.condition-row').forEach(row => {
+            const field = row.querySelector('.cond-field').value;
+            const operator = row.querySelector('.cond-operator').value;
+            const valEl = row.querySelector('.cond-value');
+            const value = valEl ? valEl.value : '';
+            if (field && operator && value !== '') {
+                const opts = FIELD_OPTIONS[field];
+                let finalValue = value;
+                if (opts && opts.type === 'number') finalValue = Number(value);
+                conditions.push({field, operator, value: finalValue});
+            }
+        });
+
+        return {name, description, conditions, condition_logic: conditionLogic, action};
+    }
+
+    async function saveRule() {
+        const data = collectFormData();
+        if (!data.name) { alert('Rule name is required'); return; }
+        if (data.conditions.length === 0) { alert('At least one condition is required'); return; }
+
+        try {
+            const url = editingRuleId ? `/api/rules/${editingRuleId}` : '/api/rules';
+            const method = editingRuleId ? 'PUT' : 'POST';
+            const resp = await fetch(url, {
+                method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)
+            });
+            const result = await resp.json();
+            if (result.error) { alert(result.error); return; }
+            closeRuleModal();
+            loadRules();
+        } catch (e) { alert('Error: ' + e.message); }
+    }
+
+    async function deleteRule(ruleId) {
+        if (!confirm('Delete this rule?')) return;
+        try {
+            await fetch(`/api/rules/${ruleId}`, {method: 'DELETE'});
+            loadRules();
+        } catch (e) { alert('Error: ' + e.message); }
+    }
+
+    async function previewRule(ruleId) {
+        previewRuleId = ruleId;
+        document.getElementById('previewModal').style.display = 'flex';
+        document.getElementById('previewBody').innerHTML = '<div class="spinner-container"><div class="spinner"></div><p>Matching emails...</p></div>';
+        document.getElementById('previewExecuteBtn').style.display = 'none';
+
+        try {
+            const resp = await fetch(`/api/rules/${ruleId}/preview`, {method: 'POST'});
+            const data = await resp.json();
+            if (data.error) {
+                document.getElementById('previewBody').innerHTML = `<p class="error">${data.error}</p>`;
+                return;
+            }
+
+            let html = `
+                <div class="preview-summary">
+                    <div class="stat"><span class="stat-value">${data.matched_count.toLocaleString()}</span><span class="stat-label">Matching Emails</span></div>
+                    <div class="stat"><span class="stat-value">${formatSize(data.estimated_size_bytes)}</span><span class="stat-label">Estimated Size</span></div>
+                </div>`;
+
+            if (data.samples && data.samples.length > 0) {
+                html += `<h4 style="margin: 1rem 0 0.5rem;">Sample Matches</h4>
+                <table class="email-table"><thead><tr><th>From</th><th>Subject</th><th>Date</th><th>Size</th></tr></thead><tbody>`;
+                data.samples.forEach(s => {
+                    html += `<tr><td class="email-from">${escapeHtml(s.from_name || s.from)}</td><td class="email-subject">${escapeHtml(s.subject)}</td><td class="email-date">${s.date}</td><td class="email-size">${s.size_kb} KB</td></tr>`;
+                });
+                html += '</tbody></table>';
+            }
+
+            document.getElementById('previewBody').innerHTML = html;
+            if (data.matched_count > 0) {
+                document.getElementById('previewExecuteBtn').style.display = 'inline-block';
+            }
+        } catch (e) {
+            document.getElementById('previewBody').innerHTML = `<p class="error">${e.message}</p>`;
+        }
+    }
+
+    function closePreviewModal() { document.getElementById('previewModal').style.display = 'none'; }
+
+    function executeFromPreview() {
+        closePreviewModal();
+        if (previewRuleId) executeRule(previewRuleId);
+    }
+
+    async function executeRule(ruleId) {
+        if (!confirm('Execute this rule? Matching emails will be deleted.')) return;
+
+        const progress = document.getElementById('executionProgress');
+        progress.style.display = 'block';
+        document.getElementById('execProgressFill').style.width = '0%';
+        document.getElementById('execProgressText').textContent = 'Starting...';
+
+        try {
+            const resp = await fetch(`/api/rules/${ruleId}/execute`, {method: 'POST'});
+            const start = await resp.json();
+            if (start.error) { alert(start.error); progress.style.display = 'none'; return; }
+
+            document.getElementById('executionTitle').textContent = `Executing Rule (${start.total.toLocaleString()} emails)...`;
+
+            while (true) {
+                await new Promise(r => setTimeout(r, 500));
+                const pr = await fetch('/api/rules/execute/progress');
+                const pd = await pr.json();
+
+                if (pd.status === 'error') {
+                    document.getElementById('execProgressText').textContent = 'Error: ' + pd.error;
+                    break;
+                }
+                if (pd.status === 'complete') {
+                    const r = pd.result;
+                    document.getElementById('execProgressFill').style.width = '100%';
+                    document.getElementById('execProgressText').textContent = `Done! ${r.success} deleted, ${(r.errors || []).length} errors`;
+                    document.getElementById('executionTitle').textContent = 'Rule Execution Complete';
+                    await fetch('/api/rules/execute/reset', {method: 'POST'});
+                    loadRules();
+                    break;
+                }
+                if (pd.status === 'running' && pd.progress) {
+                    const p = pd.progress;
+                    const pct = p.total > 0 ? Math.round((p.current / p.total) * 100) : 0;
+                    document.getElementById('execProgressFill').style.width = pct + '%';
+                    document.getElementById('execProgressText').textContent = p.message;
+                }
+            }
+        } catch (e) {
+            document.getElementById('execProgressText').textContent = 'Error: ' + e.message;
+        }
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+</script>
+{% endblock %}

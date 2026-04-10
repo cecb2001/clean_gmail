@@ -8,7 +8,7 @@ import json
 import time
 
 import config
-from gmail import GmailAuth, GmailClient, EmailAnalyzer
+from gmail import GmailAuth, GmailClient, EmailAnalyzer, RuleEngine, UnsubscribeManager
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -32,9 +32,97 @@ _delete_job = {
     'email_ids': [],
     'permanent': False
 }
+_rule_job = {
+    'running': False,
+    'progress': None,
+    'result': None,
+    'error': None,
+    'rule_id': None,
+}
+_unsubscribe_job = {
+    'running': False,
+    'progress': None,
+    'result': None,
+    'error': None,
+}
 
 # File to persist analysis data
 ANALYSIS_CACHE_FILE = 'analysis_cache.json'
+EMAIL_INDEX_FILE = str(config.EMAIL_INDEX_FILE)
+USER_ACTIONS_FILE = str(config.USER_ACTIONS_FILE)
+
+
+def load_user_actions():
+    """Load user action history from file."""
+    try:
+        if os.path.exists(USER_ACTIONS_FILE):
+            with open(USER_ACTIONS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[Actions] Failed to load: {e}", flush=True)
+    return {'deleted': {}, 'dismissed': {}, 'kept': {}}
+
+
+def save_user_actions(actions):
+    """Save user action history to file."""
+    try:
+        with open(USER_ACTIONS_FILE, 'w') as f:
+            json.dump(actions, f, indent=2)
+    except Exception as e:
+        print(f"[Actions] Failed to save: {e}", flush=True)
+
+
+def _record_deleted_senders(deleted_ids):
+    """Record sender info for deleted emails in user_actions.json."""
+    index = load_email_index()
+    if not index:
+        return
+    actions = load_user_actions()
+    now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    for eid in deleted_ids:
+        entry = index.get(eid)
+        if not entry:
+            continue
+        for prefix, key in [('sender_domain', entry.get('sd')),
+                            ('sender_email', entry.get('se'))]:
+            if not key:
+                continue
+            action_key = f'{prefix}:{key}'
+            existing = actions['deleted'].get(action_key, {'email_count': 0})
+            existing['email_count'] = existing.get('email_count', 0) + 1
+            existing['last_action'] = now
+            actions['deleted'][action_key] = existing
+    save_user_actions(actions)
+
+
+def save_email_index(index):
+    """Save email index to file."""
+    try:
+        with open(EMAIL_INDEX_FILE, 'w') as f:
+            json.dump(index, f)
+        print(f"[Index] Saved email index ({len(index):,} emails) to {EMAIL_INDEX_FILE}", flush=True)
+    except Exception as e:
+        print(f"[Index] Failed to save: {e}", flush=True)
+
+def load_email_index():
+    """Load email index from file."""
+    try:
+        if os.path.exists(EMAIL_INDEX_FILE):
+            with open(EMAIL_INDEX_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[Index] Failed to load: {e}", flush=True)
+    return None
+
+def _update_email_index(deleted_ids):
+    """Remove deleted IDs from the email index file."""
+    index = load_email_index()
+    if not index:
+        return
+    deleted_set = set(deleted_ids) if not isinstance(deleted_ids, set) else deleted_ids
+    for eid in deleted_set:
+        index.pop(eid, None)
+    save_email_index(index)
 
 def save_analysis_to_file(data):
     """Save analysis data to file for persistence."""
@@ -110,6 +198,7 @@ def _update_cached_analysis(deleted_ids, save_to_file=True):
     # Persist to file
     if save_to_file:
         save_analysis_to_file(analysis)
+        _update_email_index(deleted_ids_set)
         print(f"[Cache] Updated analysis cache after deleting {len(deleted_ids_set)} emails", flush=True)
 
 
@@ -288,66 +377,94 @@ def api_analyze_start():
                 'total': total_emails
             }
 
-            # Stage 2: Fetch message metadata
-            metadata_headers = ['From', 'To', 'Subject', 'Date', 'List-Unsubscribe']
+            # Stage 2: Incremental metadata fetch
+            existing_index = load_email_index() or {}
+            message_id_set = set(message_ids)
+
+            # Split: known (in enriched index) vs new (need to fetch)
+            known_ids = [mid for mid in message_ids
+                         if mid in existing_index and existing_index[mid].get('dt')]
+            new_ids = [mid for mid in message_ids if mid not in existing_index or not existing_index.get(mid, {}).get('dt')]
+
+            # Reconstruct cached emails
+            cached_count = 0
+            for mid in known_ids:
+                email = analyzer.reconstruct_email_from_index(mid, existing_index[mid])
+                if email:
+                    analyzer._emails.append(email)
+                    cached_count += 1
+                else:
+                    new_ids.append(mid)
+
+            print(f"[Metadata] {cached_count:,} from cache, {len(new_ids):,} new to fetch", flush=True)
+            _analysis_job['progress'] = {
+                'stage': 'fetching_metadata',
+                'message': f'{cached_count:,} from cache, fetching {len(new_ids):,} new...',
+                'current': cached_count,
+                'total': total_emails
+            }
+
+            # Fetch metadata only for new emails
+            metadata_headers = ['From', 'To', 'Subject', 'Date', 'List-Unsubscribe', 'List-Unsubscribe-Post']
             batch_size = 25
             error_count = 0
-            success_count = 0
+            success_count = cached_count
             failed_ids = []
-            processed_ids = set()
+            processed_ids = set(known_ids)
 
-            print(f"[Metadata] Starting metadata fetch for {total_emails} emails in batches of {batch_size}", flush=True)
+            if new_ids:
+                print(f"[Metadata] Fetching metadata for {len(new_ids)} new emails in batches of {batch_size}", flush=True)
 
-            for i in range(0, len(message_ids), batch_size):
-                batch_ids = message_ids[i:i + batch_size]
+                for i in range(0, len(new_ids), batch_size):
+                    batch_ids = new_ids[i:i + batch_size]
 
-                max_retries = 3
-                messages = []
-                for attempt in range(max_retries):
-                    try:
-                        messages = client.get_messages_batch(
-                            batch_ids,
-                            format='metadata',
-                            metadata_headers=metadata_headers
-                        )
-                        break
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            print(f"[Metadata] Batch {i//batch_size + 1} failed (attempt {attempt + 1}): {e}, retrying...", flush=True)
-                            time.sleep(2)
-                        else:
-                            print(f"[Metadata] Batch {i//batch_size + 1} failed after {max_retries} attempts: {e}", flush=True)
-                            messages = []
-
-                batch_errors = 0
-                for msg in messages:
-                    if 'error' not in msg:
+                    max_retries = 3
+                    messages = []
+                    for attempt in range(max_retries):
                         try:
-                            analyzer._emails.append(analyzer._parse_message(msg))
-                            success_count += 1
-                            processed_ids.add(msg.get('id'))
+                            messages = client.get_messages_batch(
+                                batch_ids,
+                                format='metadata',
+                                metadata_headers=metadata_headers
+                            )
+                            break
                         except Exception as e:
+                            if attempt < max_retries - 1:
+                                print(f"[Metadata] Batch {i//batch_size + 1} failed (attempt {attempt + 1}): {e}, retrying...", flush=True)
+                                time.sleep(2)
+                            else:
+                                print(f"[Metadata] Batch {i//batch_size + 1} failed after {max_retries} attempts: {e}", flush=True)
+                                messages = []
+
+                    batch_errors = 0
+                    for msg in messages:
+                        if 'error' not in msg:
+                            try:
+                                analyzer._emails.append(analyzer._parse_message(msg))
+                                success_count += 1
+                                processed_ids.add(msg.get('id'))
+                            except Exception as e:
+                                batch_errors += 1
+                                failed_ids.append(msg.get('id'))
+                        else:
                             batch_errors += 1
                             failed_ids.append(msg.get('id'))
-                    else:
-                        batch_errors += 1
-                        failed_ids.append(msg.get('id'))
 
-                error_count += batch_errors
-                if batch_errors > 0:
-                    print(f"[Metadata] Batch {i//batch_size + 1}: {len(messages) - batch_errors} success, {batch_errors} errors", flush=True)
+                    error_count += batch_errors
+                    if batch_errors > 0:
+                        print(f"[Metadata] Batch {i//batch_size + 1}: {len(messages) - batch_errors} success, {batch_errors} errors", flush=True)
 
-                fetched = min(i + batch_size, total_emails)
-                _analysis_job['progress'] = {
-                    'stage': 'fetching_metadata',
-                    'message': f'Processed {fetched:,} of {total_emails:,} ({success_count:,} loaded, {error_count:,} errors)',
-                    'current': fetched,
-                    'total': total_emails
-                }
+                    fetched = cached_count + min(i + batch_size, len(new_ids))
+                    _analysis_job['progress'] = {
+                        'stage': 'fetching_metadata',
+                        'message': f'Processed {fetched:,} of {total_emails:,} ({cached_count:,} cached, {success_count - cached_count:,} fetched, {error_count:,} errors)',
+                        'current': fetched,
+                        'total': total_emails
+                    }
 
-                time.sleep(0.05)
+                    time.sleep(0.05)
 
-            print(f"[Metadata] Initial pass complete: {success_count} success, {error_count} errors", flush=True)
+                print(f"[Metadata] Initial pass complete: {success_count} success ({cached_count} cached), {error_count} errors", flush=True)
 
             # Retry failed IDs
             if failed_ids:
@@ -399,16 +516,33 @@ def api_analyze_start():
 
             print(f"[Metadata] Final: {success_count} success, {error_count} errors out of {total_emails} total", flush=True)
 
-            # Stage 3: Analyze patterns
+            # Stage 3: Analyze patterns (with user action learning)
             _analysis_job['progress'] = {'stage': 'analyzing', 'message': 'Analyzing patterns...', 'current': 0, 'total': 0}
 
-            result = analyzer.analyze()
+            user_actions = load_user_actions()
+            unsub_tracking = None
+            try:
+                unsub_path = str(config.UNSUBSCRIBE_TRACKING_FILE)
+                if os.path.exists(unsub_path):
+                    with open(unsub_path, 'r') as f:
+                        unsub_tracking = json.load(f)
+            except Exception:
+                pass
+
+            result = analyzer.analyze(user_actions=user_actions, unsubscribe_tracking=unsub_tracking)
             _analysis_cache['last_analysis'] = result
             _analysis_job['result'] = result
             _analysis_job['running'] = False
 
             # Save to file for persistence
             save_analysis_to_file(result)
+
+            # Build and merge email index (preserve existing entries for emails no longer in mailbox)
+            new_index = analyzer.build_email_index()
+            # Remove entries for emails that no longer exist in Gmail
+            pruned_index = {k: v for k, v in existing_index.items() if k in message_id_set}
+            pruned_index.update(new_index)
+            save_email_index(pruned_index)
 
             print(f"[Analyze] Complete!", flush=True)
 
@@ -451,6 +585,22 @@ def api_analyze_progress():
         })
 
     return jsonify({'status': 'idle'})
+
+
+@app.route('/api/analyze/reset', methods=['POST'])
+def api_analyze_reset():
+    """Reset analysis job state."""
+    global _analysis_job
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    _analysis_job = {
+        'running': False,
+        'progress': None,
+        'result': None,
+        'error': None
+    }
+    return jsonify({'status': 'reset'})
 
 
 @app.route('/api/analyze/cached')
@@ -623,6 +773,7 @@ def api_delete_start():
                 # Progressively update cache after each batch
                 if batch_deleted_ids:
                     _update_cached_analysis(batch_deleted_ids, save_to_file=True)
+                    _record_deleted_senders(batch_deleted_ids)
 
                 processed = min(i + batch_size, total)
                 _delete_job['progress'] = {
@@ -658,6 +809,7 @@ def api_delete_start():
                     # Update cache every 20 successful retries
                     if len(retry_deleted_ids) >= 20:
                         _update_cached_analysis(retry_deleted_ids, save_to_file=True)
+                        _record_deleted_senders(retry_deleted_ids)
                         retry_deleted_ids = []
 
                     if (idx + 1) % 10 == 0:
@@ -673,6 +825,7 @@ def api_delete_start():
                 # Update cache with any remaining retry successes
                 if retry_deleted_ids:
                     _update_cached_analysis(retry_deleted_ids, save_to_file=True)
+                    _record_deleted_senders(retry_deleted_ids)
 
                 results['success'] += retry_success
                 results['errors'] = final_errors
@@ -808,7 +961,7 @@ def api_analyze_stream():
             # Stage 2: Fetch message metadata in batches
             yield f"data: {json.dumps({'type': 'progress', 'current': 0, 'total': total_emails, 'stage': 'fetching_metadata', 'message': 'Fetching email details...'})}\n\n"
 
-            metadata_headers = ['From', 'To', 'Subject', 'Date', 'List-Unsubscribe']
+            metadata_headers = ['From', 'To', 'Subject', 'Date', 'List-Unsubscribe', 'List-Unsubscribe-Post']
             batch_size = 25  # Small batch size to avoid rate limiting
             error_count = 0
             success_count = 0
@@ -920,6 +1073,10 @@ def api_analyze_stream():
 
             result = analyzer.analyze()
             _analysis_cache['last_analysis'] = result
+
+            # Build and save email index for rule matching
+            email_index = analyzer.build_email_index()
+            save_email_index(email_index)
 
             yield f"data: {json.dumps({'type': 'complete', 'data': result})}\n\n"
 
@@ -1369,6 +1526,489 @@ def format_size(size_bytes):
 
 # Register template filters
 app.jinja_env.filters['format_size'] = format_size
+
+
+# ============================================================
+# Rules Routes
+# ============================================================
+
+_rule_engine = RuleEngine()
+
+
+@app.route('/rules')
+def rules_page():
+    """Rules management page."""
+    if not _auth.is_authenticated():
+        return redirect(url_for('login'))
+    return render_template('rules.html')
+
+
+@app.route('/api/rules')
+def api_rules_list():
+    """List all rules."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    return jsonify({'rules': _rule_engine.load_rules()})
+
+
+@app.route('/api/rules', methods=['POST'])
+def api_rules_create():
+    """Create a new rule."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    data = request.get_json() or {}
+    name = data.get('name', '').strip()
+    conditions = data.get('conditions', [])
+    action = data.get('action', 'trash')
+    description = data.get('description', '')
+    condition_logic = data.get('condition_logic', 'AND')
+
+    if not name:
+        return jsonify({'error': 'Rule name is required'}), 400
+    if not conditions:
+        return jsonify({'error': 'At least one condition is required'}), 400
+    if action not in ('trash', 'delete'):
+        return jsonify({'error': 'Action must be trash or delete'}), 400
+
+    rule = _rule_engine.create_rule(name, conditions, action, description, condition_logic)
+    return jsonify({'rule': rule})
+
+
+@app.route('/api/rules/<rule_id>', methods=['PUT'])
+def api_rules_update(rule_id):
+    """Update an existing rule."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    data = request.get_json() or {}
+    allowed_fields = {'name', 'description', 'conditions', 'action', 'condition_logic', 'enabled'}
+    updates = {k: v for k, v in data.items() if k in allowed_fields}
+
+    rule = _rule_engine.update_rule(rule_id, **updates)
+    if rule:
+        return jsonify({'rule': rule})
+    return jsonify({'error': 'Rule not found'}), 404
+
+
+@app.route('/api/rules/<rule_id>', methods=['DELETE'])
+def api_rules_delete(rule_id):
+    """Delete a rule."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    if _rule_engine.delete_rule(rule_id):
+        return jsonify({'status': 'deleted'})
+    return jsonify({'error': 'Rule not found'}), 404
+
+
+@app.route('/api/rules/<rule_id>/preview', methods=['POST'])
+def api_rules_preview(rule_id):
+    """Preview which emails match a rule."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    rule = _rule_engine.get_rule(rule_id)
+    if not rule:
+        return jsonify({'error': 'Rule not found'}), 404
+
+    email_index = load_email_index()
+    if not email_index:
+        return jsonify({'error': 'No email index. Please run analysis first.'}), 400
+
+    preview = _rule_engine.preview_rule(rule, email_index)
+
+    # Get sample emails for display
+    samples = []
+    if preview['matched_ids']:
+        analyzer = get_analyzer()
+        if analyzer:
+            samples = analyzer.get_email_samples(preview['matched_ids'][:10], limit=10)
+
+    return jsonify({
+        'matched_count': preview['matched_count'],
+        'estimated_size_bytes': preview['estimated_size_bytes'],
+        'samples': samples,
+    })
+
+
+@app.route('/api/rules/<rule_id>/execute', methods=['POST'])
+def api_rules_execute(rule_id):
+    """Execute a rule — delete matching emails."""
+    global _rule_job
+
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    if _rule_job['running'] or _delete_job['running']:
+        return jsonify({'error': 'Another job is already running'}), 400
+
+    rule = _rule_engine.get_rule(rule_id)
+    if not rule:
+        return jsonify({'error': 'Rule not found'}), 404
+
+    email_index = load_email_index()
+    if not email_index:
+        return jsonify({'error': 'No email index. Please run analysis first.'}), 400
+
+    matched_ids = _rule_engine.match_emails(rule, email_index)
+    if not matched_ids:
+        return jsonify({'error': 'No emails match this rule'}), 400
+
+    _rule_job = {
+        'running': True,
+        'progress': {'current': 0, 'total': len(matched_ids), 'success': 0, 'errors': 0, 'message': 'Starting...'},
+        'result': None,
+        'error': None,
+        'rule_id': rule_id,
+    }
+
+    import threading
+
+    def run_rule_execution():
+        global _rule_job
+        try:
+            client = get_gmail_client()
+            if not client:
+                _rule_job['error'] = 'Failed to get Gmail client'
+                _rule_job['running'] = False
+                return
+
+            total = len(matched_ids)
+            action = rule.get('action', 'trash')
+            permanent = action == 'delete'
+            results = {'success': 0, 'errors': []}
+            batch_size = 10
+
+            print(f"[Rule] Executing rule '{rule['name']}': {action} {total} emails", flush=True)
+
+            for i in range(0, total, batch_size):
+                batch_ids = matched_ids[i:i + batch_size]
+
+                for msg_id in batch_ids:
+                    try:
+                        if permanent:
+                            client.service.users().messages().delete(userId='me', id=msg_id).execute()
+                        else:
+                            client.service.users().messages().trash(userId='me', id=msg_id).execute()
+                        results['success'] += 1
+                    except Exception as e:
+                        results['errors'].append({'id': msg_id, 'error': str(e)})
+
+                if results['success'] > 0:
+                    successful_ids = [mid for mid in batch_ids if mid not in {e['id'] for e in results['errors']}]
+                    if successful_ids:
+                        _update_cached_analysis(successful_ids, save_to_file=True)
+
+                processed = min(i + batch_size, total)
+                _rule_job['progress'] = {
+                    'current': processed,
+                    'total': total,
+                    'success': results['success'],
+                    'errors': len(results['errors']),
+                    'message': f"Processed {results['success']:,} of {total:,} emails...",
+                }
+                time.sleep(0.2)
+
+            # Update rule with last run info
+            _rule_engine.update_rule(rule_id, last_run=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                     last_run_result={'success': results['success'], 'errors': len(results['errors'])})
+
+            _rule_job['result'] = results
+            _rule_job['running'] = False
+            print(f"[Rule] Complete: {results['success']} success, {len(results['errors'])} errors", flush=True)
+
+        except Exception as e:
+            print(f"[Rule] Error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            _rule_job['error'] = str(e)
+            _rule_job['running'] = False
+
+    thread = threading.Thread(target=run_rule_execution)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'status': 'started', 'total': len(matched_ids)})
+
+
+@app.route('/api/rules/execute/progress')
+def api_rules_progress():
+    """Get rule execution progress."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    if _rule_job['error']:
+        return jsonify({'status': 'error', 'error': _rule_job['error'], 'progress': _rule_job['progress']})
+    if _rule_job['result']:
+        return jsonify({'status': 'complete', 'result': _rule_job['result'], 'progress': _rule_job['progress']})
+    if _rule_job['running']:
+        return jsonify({'status': 'running', 'progress': _rule_job['progress']})
+    return jsonify({'status': 'idle'})
+
+
+@app.route('/api/rules/execute/reset', methods=['POST'])
+def api_rules_reset():
+    """Reset rule execution job state."""
+    global _rule_job
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    _rule_job = {'running': False, 'progress': None, 'result': None, 'error': None, 'rule_id': None}
+    return jsonify({'status': 'reset'})
+
+
+# ============================================================
+# Unsubscribe Manager Routes
+# ============================================================
+
+@app.route('/unsubscribe')
+def unsubscribe_page():
+    """Unsubscribe manager page."""
+    if not _auth.is_authenticated():
+        return redirect(url_for('login'))
+    return render_template('unsubscribe.html')
+
+
+@app.route('/api/unsubscribe/suggestions')
+def api_unsub_suggestions():
+    """Get unsubscribe suggestions based on analysis data."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    analysis = _analysis_cache.get('last_analysis')
+    if not analysis:
+        analysis = load_analysis_from_file()
+        if analysis:
+            _analysis_cache['last_analysis'] = analysis
+
+    if not analysis:
+        return jsonify({'error': 'No analysis data. Please run analysis first.'}), 400
+
+    email_index = load_email_index()
+    if not email_index:
+        return jsonify({'error': 'No email index. Please run analysis first.'}), 400
+
+    client = get_gmail_client()
+    if not client:
+        return jsonify({'error': 'Failed to get Gmail client'}), 500
+
+    manager = UnsubscribeManager(client)
+    suggestions = manager.get_suggestions(analysis, email_index)
+
+    return jsonify({
+        'suggestions': suggestions,
+        'already_unsubscribed': len(manager.get_unsubscribed_senders()),
+    })
+
+
+@app.route('/api/unsubscribe/execute', methods=['POST'])
+def api_unsub_execute():
+    """Unsubscribe from a single sender."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    client = get_gmail_client()
+    if not client:
+        return jsonify({'error': 'Failed to get Gmail client'}), 500
+
+    data = request.get_json() or {}
+    sender_email = data.get('sender_email', '')
+    display_name = data.get('display_name', '')
+
+    if not sender_email:
+        return jsonify({'error': 'sender_email is required'}), 400
+
+    # Fetch fresh unsubscribe info
+    unsub_info = client.get_unsubscribe_link_for_sender(sender_email)
+    if not unsub_info:
+        return jsonify({'error': f'No unsubscribe link found for {sender_email}'}), 404
+
+    # Convert to the format UnsubscribeManager expects
+    full_msg = client.get_message_full(unsub_info['source_email_id'])
+    unsub_links = full_msg.get('unsubscribe_links', {})
+
+    manager = UnsubscribeManager(client)
+    result = manager.execute_unsubscribe(sender_email, unsub_links, display_name)
+
+    return jsonify(result)
+
+
+@app.route('/api/unsubscribe/batch/start', methods=['POST'])
+def api_unsub_batch_start():
+    """Start batch unsubscribe as a background job."""
+    global _unsubscribe_job
+
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    if _unsubscribe_job['running']:
+        return jsonify({'error': 'Unsubscribe job already running'}), 400
+
+    data = request.get_json() or {}
+    senders = data.get('senders', [])
+
+    if not senders:
+        return jsonify({'error': 'No senders specified'}), 400
+
+    _unsubscribe_job = {
+        'running': True,
+        'progress': {'current': 0, 'total': len(senders), 'message': 'Starting...', 'details': []},
+        'result': None,
+        'error': None,
+    }
+
+    import threading
+
+    def run_batch_unsub():
+        global _unsubscribe_job
+        try:
+            client = get_gmail_client()
+            if not client:
+                _unsubscribe_job['error'] = 'Failed to get Gmail client'
+                _unsubscribe_job['running'] = False
+                return
+
+            manager = UnsubscribeManager(client)
+            total = len(senders)
+            results = {'success': 0, 'failed': 0, 'details': []}
+
+            for i, sender_info in enumerate(senders):
+                sender_email = sender_info.get('sender_email', '')
+                display_name = sender_info.get('display_name', '')
+
+                _unsubscribe_job['progress']['message'] = f"Unsubscribing from {sender_email}..."
+
+                # Fetch fresh unsubscribe info
+                unsub_info_raw = client.get_unsubscribe_link_for_sender(sender_email)
+
+                if unsub_info_raw:
+                    full_msg = client.get_message_full(unsub_info_raw['source_email_id'])
+                    unsub_links = full_msg.get('unsubscribe_links', {})
+                    result = manager.execute_unsubscribe(sender_email, unsub_links, display_name)
+                else:
+                    result = {
+                        'sender_email': sender_email,
+                        'status': 'failed',
+                        'error': 'No unsubscribe link found',
+                    }
+
+                if result.get('status') in ('success', 'unknown'):
+                    results['success'] += 1
+                else:
+                    results['failed'] += 1
+                results['details'].append(result)
+
+                _unsubscribe_job['progress'] = {
+                    'current': i + 1,
+                    'total': total,
+                    'message': f"Processed {i + 1} of {total}...",
+                    'details': results['details'],
+                }
+
+                if i + 1 < total:
+                    time.sleep(config.UNSUBSCRIBE_BATCH_DELAY)
+
+            _unsubscribe_job['result'] = results
+            _unsubscribe_job['running'] = False
+            print(f"[Unsub] Batch complete: {results['success']} success, {results['failed']} failed", flush=True)
+
+        except Exception as e:
+            print(f"[Unsub] Batch error: {e}", flush=True)
+            _unsubscribe_job['error'] = str(e)
+            _unsubscribe_job['running'] = False
+
+    thread = threading.Thread(target=run_batch_unsub)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'status': 'started', 'total': len(senders)})
+
+
+@app.route('/api/unsubscribe/batch/progress')
+def api_unsub_batch_progress():
+    """Get batch unsubscribe progress."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    if _unsubscribe_job['error']:
+        return jsonify({'status': 'error', 'error': _unsubscribe_job['error']})
+    if _unsubscribe_job['result']:
+        return jsonify({'status': 'complete', 'result': _unsubscribe_job['result']})
+    if _unsubscribe_job['running']:
+        return jsonify({'status': 'running', 'progress': _unsubscribe_job['progress']})
+    return jsonify({'status': 'idle'})
+
+
+@app.route('/api/unsubscribe/batch/reset', methods=['POST'])
+def api_unsub_batch_reset():
+    """Reset unsubscribe job state."""
+    global _unsubscribe_job
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    _unsubscribe_job = {'running': False, 'progress': None, 'result': None, 'error': None}
+    return jsonify({'status': 'reset'})
+
+
+@app.route('/api/unsubscribe/history')
+def api_unsub_history():
+    """Get unsubscribe history."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    client = get_gmail_client()
+    if not client:
+        return jsonify({'error': 'Failed to get Gmail client'}), 500
+
+    manager = UnsubscribeManager(client)
+    return jsonify({'history': manager.get_unsubscribed_senders()})
+
+
+# ============================================================
+# User Actions Routes
+# ============================================================
+
+@app.route('/api/user-actions')
+def api_user_actions():
+    """Get user action history."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    return jsonify(load_user_actions())
+
+
+@app.route('/api/patterns/<pattern_type>/<path:pattern_key>/dismiss', methods=['POST'])
+def api_pattern_dismiss(pattern_type, pattern_key):
+    """Record that the user dismissed a pattern."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    actions = load_user_actions()
+    action_key = f'{pattern_type}:{pattern_key}'
+    existing = actions['dismissed'].get(action_key, {'times_dismissed': 0})
+    existing['dismissed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    existing['times_dismissed'] = existing.get('times_dismissed', 0) + 1
+    actions['dismissed'][action_key] = existing
+    # Remove from kept if it was there
+    actions['kept'].pop(action_key, None)
+    save_user_actions(actions)
+    return jsonify({'status': 'dismissed', 'key': action_key})
+
+
+@app.route('/api/patterns/<pattern_type>/<path:pattern_key>/keep', methods=['POST'])
+def api_pattern_keep(pattern_type, pattern_key):
+    """Record that the user explicitly wants to keep a pattern."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    actions = load_user_actions()
+    action_key = f'{pattern_type}:{pattern_key}'
+    existing = actions['kept'].get(action_key, {'times_kept': 0})
+    existing['kept_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    existing['times_kept'] = existing.get('times_kept', 0) + 1
+    actions['kept'][action_key] = existing
+    # Remove from dismissed if it was there
+    actions['dismissed'].pop(action_key, None)
+    save_user_actions(actions)
+    return jsonify({'status': 'kept', 'key': action_key})
 
 
 if __name__ == '__main__':
