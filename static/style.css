@@ -1300,6 +1300,31 @@ a:hover {
 .chip-protect    { background: #d9f2df; color: #116329; }
 .chip-recommend  { background: #ffe1c5; color: #9a3412; }
 
+.chip-clickable {
+    cursor: pointer;
+    user-select: none;
+    transition: filter 0.12s ease;
+}
+.chip-clickable:hover  { filter: brightness(0.94); }
+.chip-clickable:active { filter: brightness(0.88); }
+.chip-clickable:focus-visible {
+    outline: 2px solid #0356a4;
+    outline-offset: 1px;
+}
+
+.chip-mini {
+    font-size: 11px;
+    padding: 1px 6px;
+    line-height: 1.5;
+}
+
+.email-reason-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 2px;
+}
+
 .btn-protect {
     background: #e6f0ff;
     color: #0356a4;

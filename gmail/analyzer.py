@@ -223,19 +223,22 @@ class EmailAnalyzer:
         return self.analyze()
 
     def _annotate_pattern(self, pattern):
-        """Add protected_count, unprotected_count, avg_confidence to a pattern row.
+        """Add protected/unprotected counts, avg_confidence, and both ID lists
+        to a pattern row.
 
-        Looks up each pattern's email_ids against self._emails' scored data. This
-        is O(n) but only runs at analysis time; the pattern list is small.
+        Looks up each pattern's email_ids against self._emails' scored data.
+        Called for every pattern in every category; kept O(pattern_size).
         """
         ids = set(pattern.get('email_ids') or [])
         if not ids:
             pattern['protected_count'] = 0
             pattern['unprotected_count'] = 0
             pattern['avg_confidence'] = 0
+            pattern['protected_email_ids'] = []
+            pattern['unprotected_email_ids'] = []
             return
 
-        protected = 0
+        protected_ids = []
         unprotected_ids = []
         conf_sum = 0
         for e in self._emails:
@@ -246,10 +249,11 @@ class EmailAnalyzer:
                 unprotected_ids.append(e['id'])
                 conf_sum += scored.get('confidence', 0)
             else:
-                protected += 1
+                protected_ids.append(e['id'])
 
-        pattern['protected_count'] = protected
+        pattern['protected_count'] = len(protected_ids)
         pattern['unprotected_count'] = len(unprotected_ids)
+        pattern['protected_email_ids'] = protected_ids
         pattern['unprotected_email_ids'] = unprotected_ids
         pattern['avg_confidence'] = int(conf_sum / len(unprotected_ids)) if unprotected_ids else 0
 
@@ -283,6 +287,8 @@ class EmailAnalyzer:
                     'protected_count': pattern.get('protected_count', 0),
                     'avg_confidence': pattern.get('avg_confidence', 0),
                     'email_ids': pattern.get('unprotected_email_ids', []),
+                    'unprotected_email_ids': pattern.get('unprotected_email_ids', []),
+                    'protected_email_ids': pattern.get('protected_email_ids', []),
                     'source_total': pattern.get('count', 0),
                     # Alias so /api/pattern/... endpoints that read `count`
                     # keep working without a special case.
@@ -534,6 +540,44 @@ class EmailAnalyzer:
                     'size_kb': round(parsed['size_bytes'] / 1024, 1),
                 })
         return samples
+
+    def get_stored_email_previews(self, email_ids, limit=50, offset=0):
+        """Serve email previews straight from the analyzer's parsed _emails.
+
+        Unlike get_email_samples (which re-hits Gmail), this reads what we
+        already have in memory — including the scored info — so we can surface
+        protect_reasons without another API round-trip. Falls back to an empty
+        preview for any ID we don't have parsed locally.
+        """
+        wanted = set(email_ids or [])
+        if not wanted:
+            return []
+        by_id = {e['id']: e for e in self._emails if e['id'] in wanted}
+        ordered = [e for e in (email_ids or []) if e in by_id]
+        page = ordered[offset:offset + limit]
+        out = []
+        for eid in page:
+            e = by_id[by_id[eid]['id']] if eid in by_id else None
+            if not e:
+                # Preserve order even if some IDs are missing.
+                continue
+            scored = e.get('scored') or {}
+            out.append({
+                'id': e['id'],
+                'from': e.get('sender_email') or '',
+                'from_name': e.get('sender_name') or '',
+                'subject': e.get('subject') or '',
+                'date': e['date'].strftime('%Y-%m-%d %H:%M') if e.get('date') else '',
+                'snippet': (e.get('snippet') or '')[:120],
+                'size_kb': round((e.get('size_bytes') or 0) / 1024, 1),
+                'is_unread': bool(e.get('is_unread')),
+                'is_starred': bool(e.get('is_starred')),
+                'protect_reasons': list(scored.get('protect_reasons') or []),
+                'junk_reasons': list(scored.get('junk_reasons') or []),
+                'delete_confidence': scored.get('confidence', 0),
+                'recommend_delete': bool(scored.get('recommend_delete')),
+            })
+        return out
 
     def get_emails_for_pattern(self, pattern_type, pattern_key):
         if not self._analysis_cache:

@@ -1464,43 +1464,64 @@ def api_pattern_emails(pattern_type, pattern_key):
     if not analysis:
         return jsonify({'error': 'No analysis data. Please analyze first.'}), 400
 
-    # Pagination params
+    # Pagination + view filter.
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
-    per_page = min(per_page, 100)  # Max 100 per page
+    per_page = min(request.args.get('per_page', 50, type=int), 100)
+    view = (request.args.get('view') or 'default').lower()
 
-    # Find the pattern
     patterns = analysis.get('patterns', {})
-    email_ids = []
-    pattern_info = None
-
+    matched_pattern = None
     for category in patterns.values():
         for pattern in category:
             if pattern['type'] == pattern_type and pattern['key'] == pattern_key:
-                email_ids = pattern['email_ids']
-                pattern_info = {
-                    'type': pattern['type'],
-                    'key': pattern['key'],
-                    'display': pattern['display'],
-                    'count': pattern['count'],
-                    'size_bytes': pattern['size_bytes'],
-                }
+                matched_pattern = pattern
                 break
-        if email_ids:
+        if matched_pattern:
             break
 
-    if not email_ids:
+    if not matched_pattern:
         return jsonify({'error': 'Pattern not found'}), 404
 
-    # Paginate
+    # Pick which ID list to serve based on the requested view.
+    if view == 'protected':
+        email_ids = matched_pattern.get('protected_email_ids') or []
+    elif view == 'unprotected':
+        email_ids = matched_pattern.get('unprotected_email_ids') or matched_pattern.get('email_ids') or []
+    else:
+        email_ids = matched_pattern.get('email_ids') or []
+
+    pattern_info = {
+        'type': matched_pattern['type'],
+        'key': matched_pattern['key'],
+        'display': matched_pattern['display'],
+        'count': len(email_ids),
+        'size_bytes': matched_pattern.get('size_bytes', 0),
+        'view': view,
+    }
+
+    if not email_ids:
+        return jsonify({
+            'pattern': pattern_info,
+            'emails': [],
+            'pagination': {'page': 1, 'per_page': per_page, 'total': 0,
+                           'total_pages': 0, 'has_next': False, 'has_prev': False},
+        })
+
     total = len(email_ids)
     start = (page - 1) * per_page
     end = start + per_page
     page_ids = email_ids[start:end]
 
-    # Fetch email details
-    analyzer = get_analyzer()
-    emails = analyzer.get_email_samples(page_ids, limit=per_page)
+    # For protected view we want to show WHY each email is kept safe. That
+    # info lives in the analyzer's scored _emails; prefer that when available
+    # (no extra Gmail API calls) and fall back to a live fetch otherwise.
+    emails = []
+    analyzer_in_memory = _last_analyzer.get('instance')
+    if analyzer_in_memory is not None and analyzer_in_memory._emails:
+        emails = analyzer_in_memory.get_stored_email_previews(page_ids, limit=per_page)
+    if not emails:
+        # Fallback: fresh Gmail fetch (no scored info, but populates the modal).
+        emails = get_analyzer().get_email_samples(page_ids, limit=per_page)
 
     return jsonify({
         'pattern': pattern_info,

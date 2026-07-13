@@ -907,7 +907,9 @@
                 badges.push(`<span class="chip chip-conf chip-conf-${tier}" title="Average delete-safety confidence for the unprotected emails in this group">confidence ${avgConfidence}</span>`);
             }
             if (protectedCount > 0) {
-                badges.push(`<span class="chip chip-protect" title="Kept safe: starred, replied-to, transactional, or allowlisted">kept safe: ${protectedCount.toLocaleString()}</span>`);
+                // Chip is a "peek" affordance: clicking opens the drill-down
+                // modal filtered to the kept-safe set, with protect reasons.
+                badges.push(`<span class="chip chip-protect chip-clickable" role="button" tabindex="0" title="Show the kept-safe emails (why they were protected)" onclick="event.stopPropagation(); openDrilldown('${item.type}', '${escapeAttr(item.key)}', 'protected')">kept safe: ${protectedCount.toLocaleString()}</span>`);
             }
             if (currentTab === 'safe' && unprotectedCount > 0) {
                 badges.push(`<span class="chip chip-recommend" title="Emails this preset recommends deleting">safe to delete: ${unprotectedCount.toLocaleString()}</span>`);
@@ -970,8 +972,10 @@
     }
 
     // ========== Drill-down View ==========
-    async function openDrilldown(type, key) {
-        currentPattern = { type, key };
+    async function openDrilldown(type, key, view) {
+        // view: 'protected' opens the modal filtered to kept-safe emails with
+        // reasons; anything else shows the default set for that pattern.
+        currentPattern = { type, key, view: view || 'default' };
         currentPage = 1;
         document.getElementById('drilldownModal').style.display = 'flex';
         await loadEmails(1);
@@ -982,7 +986,9 @@
         document.getElementById('emailList').innerHTML = '<p>Loading emails...</p>';
 
         try {
-            const response = await fetch(`/api/pattern/${currentPattern.type}/${encodeURIComponent(currentPattern.key)}/emails?page=${page}&per_page=50`);
+            const view = currentPattern.view || 'default';
+            const viewParam = view !== 'default' ? `&view=${encodeURIComponent(view)}` : '';
+            const response = await fetch(`/api/pattern/${currentPattern.type}/${encodeURIComponent(currentPattern.key)}/emails?page=${page}&per_page=50${viewParam}`);
             const data = await response.json();
 
             if (data.error) {
@@ -990,12 +996,15 @@
                 return;
             }
 
-            // Update header
-            document.getElementById('drilldownTitle').textContent = data.pattern.display;
+            // Header: prefix with "Kept safe:" when in protected view so the
+            // user always knows which slice they're looking at.
+            const titlePrefix = view === 'protected' ? 'Kept safe · ' : '';
+            document.getElementById('drilldownTitle').textContent = titlePrefix + data.pattern.display;
             document.getElementById('drilldownInfo').innerHTML = `
                 <span><strong>${data.pattern.count.toLocaleString()}</strong> emails</span>
                 <span><strong>${formatSize(data.pattern.size_bytes)}</strong> total size</span>
                 <span>Page ${data.pagination.page} of ${data.pagination.total_pages}</span>
+                ${view === 'protected' ? '<span class="chip chip-protect" style="margin-left:8px;">protected view</span>' : ''}
             `;
 
             // Store current page emails for selection
@@ -1010,6 +1019,24 @@
         } catch (error) {
             document.getElementById('emailList').innerHTML = `<p class="error">${error.message}</p>`;
         }
+    }
+
+    const PROTECT_REASON_LABELS = {
+        allowlisted:       'allowlisted',
+        you_replied:       'you replied',
+        high_read_rate:    'high read-rate',
+        medium_read_rate:  'engaged sender',
+        starred:           'starred',
+        transactional:     'transactional',
+        important_label:   'IMPORTANT label',
+    };
+
+    function renderProtectReasons(reasons) {
+        if (!reasons || !reasons.length) return '';
+        const chips = reasons.slice(0, 4).map(r =>
+            `<span class="chip chip-protect chip-mini" title="${escapeAttr(r)}">${escapeHtml(PROTECT_REASON_LABELS[r] || r)}</span>`
+        ).join(' ');
+        return `<div class="email-reason-chips">${chips}</div>`;
     }
 
     function displayEmailList(emails) {
@@ -1038,7 +1065,10 @@
                                        onchange="toggleEmailSelection('${email.id}')">
                             </td>
                             <td class="email-from" onclick="openEmail('${email.id}')">${escapeHtml(email.from_name || email.from)}</td>
-                            <td class="email-subject" onclick="openEmail('${email.id}')">${escapeHtml(email.subject || '(no subject)')}</td>
+                            <td class="email-subject" onclick="openEmail('${email.id}')">
+                                <div>${escapeHtml(email.subject || '(no subject)')}</div>
+                                ${renderProtectReasons(email.protect_reasons)}
+                            </td>
                             <td class="email-date" onclick="openEmail('${email.id}')">${email.date}</td>
                             <td class="email-size" onclick="openEmail('${email.id}')">${email.size_kb} KB</td>
                             <td class="email-actions">
