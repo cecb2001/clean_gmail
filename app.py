@@ -192,10 +192,29 @@ def _update_cached_analysis(deleted_ids, save_to_file=True):
                     pattern['size_bytes'] = int(original_size * ratio)
                     pattern['deleted_size_bytes'] = pattern.get('deleted_size_bytes', 0) + int(original_size * (1 - ratio))
 
+            # Also filter the intelligence-layer sub-lists so the "safe to
+            # delete: N" and "kept safe: N" chips (plus the ?view=protected
+            # drill-down) stay in sync between deletion and next rescore.
+            if 'unprotected_email_ids' in pattern:
+                filtered = [eid for eid in pattern['unprotected_email_ids']
+                            if eid not in deleted_ids_set]
+                pattern['unprotected_email_ids'] = filtered
+                pattern['unprotected_count'] = len(filtered)
+            if 'protected_email_ids' in pattern:
+                filtered = [eid for eid in pattern['protected_email_ids']
+                            if eid not in deleted_ids_set]
+                pattern['protected_email_ids'] = filtered
+                pattern['protected_count'] = len(filtered)
+
     if 'summary' in analysis:
         total_deleted = len(deleted_ids_set)
         analysis['summary']['total_emails'] = max(0, analysis['summary'].get('total_emails', 0) - total_deleted)
         analysis['summary']['deleted_count'] = analysis['summary'].get('deleted_count', 0) + total_deleted
+        # recommended_delete_count is the sum of unprotected across recommendations.
+        recs = patterns.get('by_recommended_cleanup', [])
+        analysis['summary']['recommended_delete_count'] = sum(
+            p.get('unprotected_count', 0) for p in recs
+        )
 
 
 # --- Legacy shims for callers written against the old JSON file API. ---
