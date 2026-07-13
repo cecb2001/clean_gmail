@@ -254,6 +254,21 @@
     document.addEventListener('DOMContentLoaded', checkCachedAnalysis);
 
     async function checkCachedAnalysis() {
+        // 1. If a job is already running on the server, latch onto it so a
+        //    page refresh (or a second tab) doesn't lose the in-flight run.
+        try {
+            const progressResp = await fetch('/api/analyze/progress');
+            const progressData = await progressResp.json();
+            if (progressData.status === 'running') {
+                console.log('Detected in-flight analysis on load, attaching to poll loop.');
+                await attachToRunningAnalysis();
+                return;
+            }
+        } catch (e) {
+            // Non-fatal: fall through to normal cached-check.
+            console.warn('progress probe failed on load:', e);
+        }
+
         try {
             const response = await fetch('/api/analyze/cached');
             const data = await response.json();
@@ -370,6 +385,14 @@
 
             const startData = await startResponse.json();
             if (startData.error) {
+                // "Analysis already running" is not a failure — attach to the
+                // in-flight run instead of starting a new one.
+                if (/already running/i.test(startData.error)) {
+                    document.getElementById('progressText').textContent =
+                        'Attaching to analysis already in progress…';
+                    await attachToRunningAnalysis();
+                    return;
+                }
                 throw new Error(startData.error);
             }
 
@@ -528,6 +551,60 @@
             return `<strong>Cached analysis</strong> from ${created.toLocaleString()} · expires in <strong>${label}</strong>${ttl}${emailsPart}`;
         } catch (e) {
             return '<strong>Cached analysis</strong>';
+        }
+    }
+
+    async function attachToRunningAnalysis() {
+        // Show the progress UI (in case we came here from page load).
+        document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+        document.getElementById('results').style.display = 'none';
+        document.getElementById('progress').style.display = 'block';
+        document.getElementById('analyzeBtn').disabled = true;
+
+        // Same poll loop used by startAnalysis. Extracted so page-load reattach
+        // and "already running" fallback can share it.
+        let idleStreak = 0;
+        const MAX_IDLE_POLLS = 10;
+        while (true) {
+            await new Promise(r => setTimeout(r, 500));
+            const resp = await fetch('/api/analyze/progress');
+            const data = await resp.json();
+
+            if (data.status === 'error') {
+                document.getElementById('analyzeBtn').disabled = false;
+                document.getElementById('progress').style.display = 'none';
+                alert('Analysis failed: ' + (data.error || 'unknown error'));
+                return;
+            }
+            if (data.status === 'complete') {
+                analysisData = data.data;
+                displayResults(data.data);
+                document.getElementById('analyzeBtn').disabled = false;
+                document.getElementById('progress').style.display = 'none';
+                return;
+            }
+            if (data.status === 'running' && data.progress) {
+                idleStreak = 0;
+                const p = data.progress;
+                if (p.total > 0) {
+                    document.getElementById('progressFill').style.width =
+                        `${Math.round((p.current / p.total) * 100)}%`;
+                }
+                document.getElementById('progressText').textContent =
+                    p.message || `${p.stage}: ${(p.current || 0).toLocaleString()} / ${(p.total || 0).toLocaleString()}`;
+                continue;
+            }
+            if (data.status === 'idle') {
+                idleStreak++;
+                if (idleStreak >= MAX_IDLE_POLLS) {
+                    document.getElementById('analyzeBtn').disabled = false;
+                    document.getElementById('progress').style.display = 'none';
+                    alert('Analysis stopped unexpectedly. The server may have restarted — try again.');
+                    return;
+                }
+                document.getElementById('progressText').textContent =
+                    `Waiting for server (${idleStreak}/${MAX_IDLE_POLLS})…`;
+            }
         }
     }
 
