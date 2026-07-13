@@ -273,7 +273,10 @@ class EmailAnalyzer:
                     continue
                 # Wrap so we don't mutate the source patterns and their scores.
                 candidates.append({
-                    'type': pattern['type'],
+                    # Distinct type so the pattern-lookup endpoints don't
+                    # confuse a recommendation entry (unprotected-only ids)
+                    # with the source pattern (all ids, all fields).
+                    'type': 'recommended_' + pattern['type'],
                     'key': pattern['key'],
                     'display': pattern['display'],
                     'unprotected_count': pattern['unprotected_count'],
@@ -281,6 +284,9 @@ class EmailAnalyzer:
                     'avg_confidence': pattern.get('avg_confidence', 0),
                     'email_ids': pattern.get('unprotected_email_ids', []),
                     'source_total': pattern.get('count', 0),
+                    # Alias so /api/pattern/... endpoints that read `count`
+                    # keep working without a special case.
+                    'count': pattern['unprotected_count'],
                     'size_bytes': pattern.get('size_bytes', 0),
                     'unread': pattern.get('unread', 0),
                 })

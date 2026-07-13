@@ -88,6 +88,27 @@ def _persist_current_run(analyzer, query, preset, history_id=None):
         print(f"[Store] save_run failed: {e}", flush=True)
 
 
+def _get_or_hydrate_analysis():
+    """Return the current analysis aggregate.
+
+    Order of preference:
+      1. In-memory _analysis_cache (fastest, current session).
+      2. SQLite store: rebuild the aggregate from persisted emails.
+    Returns None only when there is truly no cached data anywhere.
+    """
+    cached = _analysis_cache.get('last_analysis')
+    if cached:
+        return cached
+    analyzer, metadata = _hydrate_analyzer_from_store()
+    if analyzer is None:
+        return None
+    result = analyzer.analyze()
+    result['cache_metadata'] = _serialize_cache_metadata(metadata)
+    _analysis_cache['last_analysis'] = result
+    _last_analyzer['instance'] = analyzer
+    return result
+
+
 def _hydrate_analyzer_from_store():
     """If the store has a live run for the current user, return an EmailAnalyzer
     with its _emails pre-populated. Returns (analyzer, metadata) or (None, None)."""
@@ -1404,7 +1425,7 @@ def api_pattern_samples(pattern_type, pattern_key):
     if not _auth.is_authenticated():
         return jsonify({'error': 'Not authenticated'}), 401
 
-    analysis = _analysis_cache.get('last_analysis')
+    analysis = _get_or_hydrate_analysis()
     if not analysis:
         return jsonify({'error': 'No analysis data. Please analyze first.'}), 400
 
@@ -1439,7 +1460,7 @@ def api_pattern_emails(pattern_type, pattern_key):
     if not _auth.is_authenticated():
         return jsonify({'error': 'Not authenticated'}), 401
 
-    analysis = _analysis_cache.get('last_analysis')
+    analysis = _get_or_hydrate_analysis()
     if not analysis:
         return jsonify({'error': 'No analysis data. Please analyze first.'}), 400
 
@@ -1803,7 +1824,7 @@ def api_cached_analysis():
     if not _auth.is_authenticated():
         return jsonify({'error': 'Not authenticated'}), 401
 
-    analysis = _analysis_cache.get('last_analysis')
+    analysis = _get_or_hydrate_analysis()
     if not analysis:
         return jsonify({'cached': False})
 

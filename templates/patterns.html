@@ -886,10 +886,12 @@
         list.innerHTML = items.map(item => {
             const isDeleted = item.count === 0 && item.deleted_count > 0;
             const hasDeleted = item.deleted_count > 0 && item.count > 0;
-            // Show unsubscribe button for sender-related patterns
-            const showUnsubscribe = !isDeleted && (item.type === 'sender_domain' || item.type === 'sender_email' || item.type === 'newsletter');
-            // Show "protect sender" button only where a sender identity exists.
-            const showProtect = !isDeleted && (item.type === 'sender_domain' || item.type === 'sender_email');
+            // Show unsubscribe / protect buttons on both source patterns AND
+            // their Safe-to-Clean recommendation counterparts (type prefixed
+            // with 'recommended_'). Strip the prefix before checking.
+            const baseType = (item.type || '').replace(/^recommended_/, '');
+            const showUnsubscribe = !isDeleted && (baseType === 'sender_domain' || baseType === 'sender_email' || baseType === 'newsletter');
+            const showProtect = !isDeleted && (baseType === 'sender_domain' || baseType === 'sender_email');
 
             // Intelligence badges (present on every pattern row after the analyzer annotates them).
             const protectedCount = item.protected_count || 0;
@@ -943,14 +945,17 @@
     }
 
     async function protectSender(type, key, displayName) {
-        if (type !== 'sender_email' && type !== 'sender_domain') return;
-        const prettyType = type === 'sender_email' ? 'sender' : 'domain';
+        // Accept both source types and their 'recommended_' variants; the
+        // allowlist API only understands sender_email / sender_domain.
+        const baseType = (type || '').replace(/^recommended_/, '');
+        if (baseType !== 'sender_email' && baseType !== 'sender_domain') return;
+        const prettyType = baseType === 'sender_email' ? 'sender' : 'domain';
         if (!confirm(`Never recommend deleting from this ${prettyType}?\n\n${displayName}\n\nYou can undo this from the Preferences view.`)) return;
         try {
             const resp = await fetch('/api/preferences/allow', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type: type, value: key }),
+                body: JSON.stringify({ type: baseType, value: key }),
             });
             const data = await resp.json();
             if (data.error) throw new Error(data.error);
