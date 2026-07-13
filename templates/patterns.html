@@ -373,9 +373,13 @@
                 throw new Error(startData.error);
             }
 
-            // Poll for progress
+            // Poll for progress. Tolerate a short burst of 'idle' responses:
+            // Flask's debug reloader can restart the worker briefly, wiping the
+            // in-memory job state. A real "stopped" only after ~5s of nothing.
+            let idleStreak = 0;
+            const MAX_IDLE_POLLS = 10; // 10 * 500ms = ~5s tolerance
             while (true) {
-                await new Promise(resolve => setTimeout(resolve, 500)); // Poll every 500ms
+                await new Promise(resolve => setTimeout(resolve, 500));
 
                 const progressResponse = await fetch('/api/analyze/progress');
                 const progressData = await progressResponse.json();
@@ -393,19 +397,23 @@
                 }
 
                 if (progressData.status === 'running' && progressData.progress) {
+                    idleStreak = 0;
                     const p = progressData.progress;
-                    // Update progress bar
                     if (p.total > 0) {
                         const percent = Math.round((p.current / p.total) * 100);
                         document.getElementById('progressFill').style.width = `${percent}%`;
                     }
-                    // Update progress text
                     document.getElementById('progressText').textContent = p.message || `${p.stage}: ${p.current.toLocaleString()} / ${p.total.toLocaleString()}`;
+                    continue;
                 }
 
                 if (progressData.status === 'idle') {
-                    // Job finished but no result? Something went wrong
-                    throw new Error('Analysis stopped unexpectedly');
+                    idleStreak++;
+                    if (idleStreak >= MAX_IDLE_POLLS) {
+                        throw new Error('Analysis stopped unexpectedly. The server may have restarted mid-run — try again.');
+                    }
+                    document.getElementById('progressText').textContent =
+                        `Waiting for server (${idleStreak}/${MAX_IDLE_POLLS})…`;
                 }
             }
         } catch (error) {
@@ -551,7 +559,10 @@
                 throw new Error(startData.error);
             }
 
-            // Reuse the shared progress loop.
+            // Reuse the shared progress loop, with the same idle tolerance
+            // as the full analyze — the reloader can wipe state briefly.
+            let idleStreak = 0;
+            const MAX_IDLE_POLLS = 10;
             while (true) {
                 await new Promise(r => setTimeout(r, 500));
                 const pr = await fetch('/api/analyze/progress');
@@ -582,6 +593,7 @@
                     return;
                 }
                 if (p.status === 'running' && p.progress) {
+                    idleStreak = 0;
                     const pg = p.progress;
                     if (pg.total > 0) {
                         document.getElementById('progressFill').style.width =
@@ -589,9 +601,15 @@
                     }
                     document.getElementById('progressText').textContent =
                         pg.message || `${pg.stage}: ${(pg.current || 0).toLocaleString()} / ${(pg.total || 0).toLocaleString()}`;
+                    continue;
                 }
                 if (p.status === 'idle') {
-                    throw new Error('Incremental sync stopped unexpectedly');
+                    idleStreak++;
+                    if (idleStreak >= MAX_IDLE_POLLS) {
+                        throw new Error('Incremental sync stopped unexpectedly. The server may have restarted — try again.');
+                    }
+                    document.getElementById('progressText').textContent =
+                        `Waiting for server (${idleStreak}/${MAX_IDLE_POLLS})…`;
                 }
             }
         } catch (e) {
