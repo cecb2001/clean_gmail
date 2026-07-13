@@ -239,10 +239,13 @@
     let globalDeleteQueue = new Set();
     let deleteQueueEmailData = new Map(); // Store email metadata for display
 
-    document.getElementById('analyzeBtn').addEventListener('click', startAnalysis);
-    document.getElementById('reviewDeleteBtn').addEventListener('click', goToConfirm);
-    document.getElementById('clearQueueBtn').addEventListener('click', clearQueue);
-    document.getElementById('addPatternToQueueBtn').addEventListener('click', addCurrentPatternToQueue);
+    // Optional chaining: some of these IDs (reviewDeleteBtn, addPatternToQueueBtn)
+    // were removed from the template in earlier iterations. A null.addEventListener
+    // used to abort the whole script and leave the page dead on load.
+    document.getElementById('analyzeBtn')?.addEventListener('click', startAnalysis);
+    document.getElementById('reviewDeleteBtn')?.addEventListener('click', goToConfirm);
+    document.getElementById('clearQueueBtn')?.addEventListener('click', clearQueue);
+    document.getElementById('addPatternToQueueBtn')?.addEventListener('click', addCurrentPatternToQueue);
 
     // Tab switching
     document.querySelectorAll('.tab-btn').forEach(btn => {
