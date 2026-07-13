@@ -10,9 +10,11 @@
         <div class="prompt-content">
             <h3>Previous Analysis Found</h3>
             <p id="cachedInfo">Found cached analysis data.</p>
+            <p id="cachedExpiry" class="cached-expiry"></p>
             <div class="prompt-actions">
                 <button class="btn btn-primary" onclick="useCachedAnalysis()">Use Previous Analysis</button>
                 <button class="btn btn-secondary" onclick="startFreshAnalysis()">Analyze Again</button>
+                <button class="btn btn-danger-outline" onclick="clearCachedAnalysis()">Clear Cache</button>
             </div>
         </div>
     </div>
@@ -33,6 +35,15 @@
     </div>
 
     <div id="results" class="results-container" style="display: none;">
+        <div id="cacheStatusBar" class="cache-status-bar" style="display: none;">
+            <span class="cache-status-text" id="cacheStatusText"></span>
+            <div class="cache-status-actions">
+                <button class="btn btn-sm btn-primary" onclick="fetchNewSinceLastSync()" title="Only fetch messages added, changed, or deleted since the last sync">Fetch new</button>
+                <button class="btn btn-sm btn-secondary" onclick="reanalyze()" title="Discard the cached analysis and re-fetch everything from Gmail">Re-analyze</button>
+                <button class="btn btn-sm btn-danger-outline" onclick="clearCacheAndReset()" title="Delete the stored analysis without re-fetching">Clear cache</button>
+            </div>
+        </div>
+
         <div class="summary-card">
             <h2>Summary</h2>
             <div class="summary-stats" id="summaryStats"></div>
@@ -43,11 +54,23 @@
             <p class="help-text">Click on a pattern to drill down and see all emails. Use checkboxes to select patterns for deletion.</p>
 
             <div class="pattern-tabs">
-                <button class="tab-btn active" data-tab="senders">Top Senders</button>
+                <button class="tab-btn active" data-tab="safe" title="Ranked recommendations excluding starred, replied-to, transactional, and allowlisted senders">Safe to Clean</button>
+                <button class="tab-btn" data-tab="senders">Top Senders</button>
                 <button class="tab-btn" data-tab="categories">Categories</button>
                 <button class="tab-btn" data-tab="age">By Age</button>
                 <button class="tab-btn" data-tab="newsletters">Newsletters</button>
                 <button class="tab-btn" data-tab="size">Large Emails</button>
+            </div>
+
+            <div id="presetBar" class="preset-bar" style="display: none;">
+                <label for="presetSelect"><strong>Cleanup preset:</strong></label>
+                <select id="presetSelect" onchange="onPresetChange(this.value)">
+                    <option value="conservative">Conservative (default)</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="aggressive">Aggressive</option>
+                </select>
+                <span id="presetDescription" class="preset-description"></span>
+                <span id="presetBusy" class="preset-busy" style="display:none;">Re-scoring…</span>
             </div>
 
             <div id="patternList" class="pattern-list"></div>
@@ -201,10 +224,11 @@
     let currentPage = 1;
 
     // Pattern list pagination
-    let currentTab = 'senders';
+    let currentTab = 'safe';
     let allPatternItems = [];
     let patternPage = 1;
     const patternsPerPage = 50;
+    let currentPreset = 'conservative';
 
     // Email selection in drilldown
     let selectedEmails = new Set();
@@ -240,13 +264,14 @@
                 const totalEmails = summary.total_emails || 0;
                 const totalSize = summary.total_size_mb || 0;
                 const deletedCount = summary.deleted_count || 0;
+                const meta = data.data.cache_metadata;
 
                 let infoText = `Found previous analysis: ${totalEmails.toLocaleString()} emails (${totalSize.toFixed(1)} MB)`;
                 if (deletedCount > 0) {
                     infoText += ` - ${deletedCount.toLocaleString()} already deleted`;
                 }
-
                 document.getElementById('cachedInfo').textContent = infoText;
+                document.getElementById('cachedExpiry').textContent = formatCacheExpiry(meta);
                 document.getElementById('cachedAnalysisPrompt').style.display = 'block';
 
                 // Restore any saved selections
@@ -254,6 +279,39 @@
             }
         } catch (error) {
             console.log('No cached analysis available:', error);
+        }
+    }
+
+    function formatCacheExpiry(meta) {
+        if (!meta || !meta.expires_at) return '';
+        try {
+            const expires = new Date(meta.expires_at);
+            const now = new Date();
+            const remainingMs = expires - now;
+            if (remainingMs <= 0) return 'Cache expired.';
+            const days = Math.floor(remainingMs / (24 * 3600 * 1000));
+            const hours = Math.floor((remainingMs % (24 * 3600 * 1000)) / (3600 * 1000));
+            const created = new Date(meta.created_at).toLocaleString();
+            const label = days > 0 ? `${days}d ${hours}h` : `${hours}h`;
+            return `Analyzed on ${created}. Cached for ${label} more (${meta.ttl_days}-day TTL).`;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    async function clearCachedAnalysis() {
+        if (!confirm('Clear the cached analysis? You will need to re-run analysis to see recommendations again.')) return;
+        try {
+            const resp = await fetch('/api/analysis/clear', { method: 'POST' });
+            const data = await resp.json();
+            if (data.error) throw new Error(data.error);
+            // Wipe local state and hide the prompt.
+            cachedAnalysisData = null;
+            analysisData = null;
+            document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+            document.getElementById('results').style.display = 'none';
+        } catch (e) {
+            alert('Failed to clear cache: ' + e.message);
         }
     }
 
@@ -307,7 +365,7 @@
             const startResponse = await fetch('/api/analyze/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: query })
+                body: JSON.stringify({ query: query, preset: currentPreset })
             });
 
             const startData = await startResponse.json();
@@ -363,6 +421,9 @@
         // Display summary
         const summary = data.summary;
         const deletedCount = summary.deleted_count || 0;
+        const recommended = summary.recommended_delete_count || 0;
+        const starred = summary.starred_count || 0;
+        const engaged = summary.engaged_sender_count || 0;
 
         let summaryHtml = `
             <div class="stat">
@@ -381,6 +442,18 @@
                 <span class="stat-value">${summary.newsletter_count.toLocaleString()}</span>
                 <span class="stat-label">Newsletters</span>
             </div>
+            <div class="stat stat-recommend">
+                <span class="stat-value">${recommended.toLocaleString()}</span>
+                <span class="stat-label">Recommended to Clean</span>
+            </div>
+            <div class="stat stat-protect">
+                <span class="stat-value">${starred.toLocaleString()}</span>
+                <span class="stat-label">Starred (protected)</span>
+            </div>
+            <div class="stat stat-protect">
+                <span class="stat-value">${engaged.toLocaleString()}</span>
+                <span class="stat-label">Senders you replied to</span>
+            </div>
         `;
 
         if (deletedCount > 0) {
@@ -394,8 +467,225 @@
 
         document.getElementById('summaryStats').innerHTML = summaryHtml;
 
-        // Show first tab
-        switchTab('senders');
+        // Persistent cache-status bar so the user can re-analyze or clear
+        // without hunting for the top-of-page controls.
+        renderCacheStatusBar(data.cache_metadata);
+
+        // Populate preset selector using the presets the backend reported.
+        renderPresetBar(data);
+
+        // Default to the Safe-to-Clean tab.
+        switchTab('safe');
+    }
+
+    function renderCacheStatusBar(meta) {
+        const bar = document.getElementById('cacheStatusBar');
+        const text = document.getElementById('cacheStatusText');
+        if (!meta || !meta.expires_at) {
+            // Fresh analysis just completed — no cache_metadata on the aggregate.
+            // Fall back to a lightweight lookup so the bar still shows.
+            fetch('/api/analysis/status').then(r => r.json()).then(data => {
+                if (data.cached && data.status) {
+                    text.innerHTML = cacheStatusMessage({
+                        created_at: data.status.created_at,
+                        expires_at: data.status.expires_at,
+                        ttl_days: data.status.ttl_days,
+                        active: data.status.active_email_count,
+                        deleted: data.status.deleted_email_count,
+                    });
+                    bar.style.display = 'flex';
+                } else {
+                    bar.style.display = 'none';
+                }
+            }).catch(() => { bar.style.display = 'none'; });
+            return;
+        }
+        text.innerHTML = cacheStatusMessage(meta);
+        bar.style.display = 'flex';
+    }
+
+    function cacheStatusMessage(meta) {
+        try {
+            const expires = new Date(meta.expires_at);
+            const created = new Date(meta.created_at);
+            const now = new Date();
+            const remainingMs = expires - now;
+            const days = Math.max(0, Math.floor(remainingMs / (24 * 3600 * 1000)));
+            const hours = Math.max(0, Math.floor((remainingMs % (24 * 3600 * 1000)) / (3600 * 1000)));
+            const label = days > 0 ? `${days}d ${hours}h` : `${hours}h`;
+            const ttl = meta.ttl_days ? ` (${meta.ttl_days}-day TTL)` : '';
+            const emailsPart = (typeof meta.active === 'number')
+                ? ` &nbsp;·&nbsp; ${meta.active.toLocaleString()} active${meta.deleted ? ', ' + meta.deleted.toLocaleString() + ' deleted' : ''}`
+                : '';
+            return `<strong>Cached analysis</strong> from ${created.toLocaleString()} · expires in <strong>${label}</strong>${ttl}${emailsPart}`;
+        } catch (e) {
+            return '<strong>Cached analysis</strong>';
+        }
+    }
+
+    async function fetchNewSinceLastSync() {
+        // Kick off the incremental background job and poll the same progress endpoint
+        // used by the full analyze flow.
+        document.getElementById('analyzeBtn').disabled = true;
+        document.getElementById('progress').style.display = 'block';
+        document.getElementById('progressFill').style.width = '0%';
+        document.getElementById('progressText').textContent = 'Checking Gmail for changes…';
+
+        try {
+            const start = await fetch('/api/analyze/incremental', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preset: currentPreset }),
+            });
+            const startData = await start.json();
+            if (startData.error) {
+                // History cursor missing (pre-incremental cache) — prompt for full re-analyze.
+                if (startData.code === 'no_history_cursor') {
+                    if (confirm(startData.error + '\n\nRun full Re-analyze now?')) {
+                        await reanalyze();
+                        return;
+                    }
+                    resetProgressUI();
+                    return;
+                }
+                throw new Error(startData.error);
+            }
+
+            // Reuse the shared progress loop.
+            while (true) {
+                await new Promise(r => setTimeout(r, 500));
+                const pr = await fetch('/api/analyze/progress');
+                const p = await pr.json();
+
+                if (p.status === 'error') {
+                    if (p.error_code === 'history_expired') {
+                        resetProgressUI();
+                        if (confirm('Gmail\'s history window (~7 days) has expired since the last sync. Run a full Re-analyze to reset the cursor?')) {
+                            await reanalyze();
+                        }
+                        return;
+                    }
+                    throw new Error(p.error);
+                }
+                if (p.status === 'complete') {
+                    analysisData = p.data;
+                    displayResults(p.data);
+                    resetProgressUI();
+                    const delta = p.data.incremental_delta || {};
+                    const changed = delta.added_or_changed || 0;
+                    const removed = delta.deleted || 0;
+                    if (changed === 0 && removed === 0) {
+                        showToast && showToast('No changes since last sync.');
+                    } else {
+                        showToast && showToast(`Synced: +${changed.toLocaleString()} changed, -${removed.toLocaleString()} deleted.`);
+                    }
+                    return;
+                }
+                if (p.status === 'running' && p.progress) {
+                    const pg = p.progress;
+                    if (pg.total > 0) {
+                        document.getElementById('progressFill').style.width =
+                            `${Math.round((pg.current / pg.total) * 100)}%`;
+                    }
+                    document.getElementById('progressText').textContent =
+                        pg.message || `${pg.stage}: ${(pg.current || 0).toLocaleString()} / ${(pg.total || 0).toLocaleString()}`;
+                }
+                if (p.status === 'idle') {
+                    throw new Error('Incremental sync stopped unexpectedly');
+                }
+            }
+        } catch (e) {
+            alert('Fetch new failed: ' + e.message);
+            resetProgressUI();
+        }
+    }
+
+    function resetProgressUI() {
+        document.getElementById('analyzeBtn').disabled = false;
+        document.getElementById('progress').style.display = 'none';
+    }
+
+    async function reanalyze() {
+        if (!confirm('Re-analyze all emails? This will re-fetch everything from Gmail and replace the cached analysis. It may take several minutes for large mailboxes.')) return;
+        try {
+            // Clear the store first so a mid-run reload doesn't show stale data.
+            await fetch('/api/analysis/clear', { method: 'POST' });
+        } catch (e) {
+            // If clear fails, still proceed to reanalyze — save_run replaces anyway.
+            console.warn('Clear before reanalyze failed, continuing:', e);
+        }
+        // Wipe local UI state and kick off a fresh run.
+        cachedAnalysisData = null;
+        analysisData = null;
+        document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+        document.getElementById('cacheStatusBar').style.display = 'none';
+        document.getElementById('results').style.display = 'none';
+        startAnalysis();
+    }
+
+    async function clearCacheAndReset() {
+        if (!confirm('Clear the cached analysis? Recommendations will be gone until you re-run analysis.')) return;
+        try {
+            const resp = await fetch('/api/analysis/clear', { method: 'POST' });
+            const data = await resp.json();
+            if (data.error) throw new Error(data.error);
+        } catch (e) {
+            alert('Failed to clear cache: ' + e.message);
+            return;
+        }
+        cachedAnalysisData = null;
+        analysisData = null;
+        document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+        document.getElementById('cacheStatusBar').style.display = 'none';
+        document.getElementById('results').style.display = 'none';
+        // Also clear any in-progress selections so the queue counter resets.
+        if (typeof deleteQueue !== 'undefined') deleteQueue.clear();
+        if (typeof globalDeleteQueue !== 'undefined') globalDeleteQueue.clear();
+        if (typeof deleteQueueEmailData !== 'undefined') deleteQueueEmailData.clear();
+        if (typeof clearSelectionState === 'function') clearSelectionState();
+        if (typeof updateDeleteQueue === 'function') updateDeleteQueue();
+        if (typeof updateGlobalDeleteQueueUI === 'function') updateGlobalDeleteQueueUI();
+    }
+
+    function renderPresetBar(data) {
+        const bar = document.getElementById('presetBar');
+        const sel = document.getElementById('presetSelect');
+        const desc = document.getElementById('presetDescription');
+        const presets = data.presets_available || [];
+        if (!presets.length) {
+            bar.style.display = 'none';
+            return;
+        }
+        currentPreset = data.preset || currentPreset || 'conservative';
+        sel.innerHTML = presets.map(p =>
+            `<option value="${p.key}" ${p.key === currentPreset ? 'selected' : ''}>${p.label}</option>`
+        ).join('');
+        const active = presets.find(p => p.key === currentPreset);
+        desc.textContent = active ? active.description : '';
+        bar.style.display = 'flex';
+    }
+
+    async function onPresetChange(newPreset) {
+        currentPreset = newPreset;
+        const busy = document.getElementById('presetBusy');
+        busy.style.display = 'inline';
+        try {
+            const resp = await fetch('/api/analyze/rescore', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ preset: newPreset }),
+            });
+            const data = await resp.json();
+            if (data.error) throw new Error(data.error);
+            analysisData = data.data;
+            renderPresetBar(data.data);
+            displayPatternPage(1);  // stay on the current tab
+            switchTab(currentTab);  // refresh items from the new analysis
+        } catch (e) {
+            alert('Rescore failed: ' + e.message);
+        } finally {
+            busy.style.display = 'none';
+        }
     }
 
     function switchTab(tab) {
@@ -410,6 +700,9 @@
         const patterns = analysisData.patterns;
 
         switch(tab) {
+            case 'safe':
+                allPatternItems = [...(patterns.by_recommended_cleanup || [])];
+                break;
             case 'senders':
                 allPatternItems = [...patterns.by_sender_domain];
                 break;
@@ -500,6 +793,28 @@
             const hasDeleted = item.deleted_count > 0 && item.count > 0;
             // Show unsubscribe button for sender-related patterns
             const showUnsubscribe = !isDeleted && (item.type === 'sender_domain' || item.type === 'sender_email' || item.type === 'newsletter');
+            // Show "protect sender" button only where a sender identity exists.
+            const showProtect = !isDeleted && (item.type === 'sender_domain' || item.type === 'sender_email');
+
+            // Intelligence badges (present on every pattern row after the analyzer annotates them).
+            const protectedCount = item.protected_count || 0;
+            const unprotectedCount = item.unprotected_count || 0;
+            const avgConfidence = item.avg_confidence || 0;
+
+            const badges = [];
+            if (avgConfidence > 0) {
+                const tier = avgConfidence >= 80 ? 'high' : (avgConfidence >= 40 ? 'med' : 'low');
+                badges.push(`<span class="chip chip-conf chip-conf-${tier}" title="Average delete-safety confidence for the unprotected emails in this group">confidence ${avgConfidence}</span>`);
+            }
+            if (protectedCount > 0) {
+                badges.push(`<span class="chip chip-protect" title="Kept safe: starred, replied-to, transactional, or allowlisted">kept safe: ${protectedCount.toLocaleString()}</span>`);
+            }
+            if (currentTab === 'safe' && unprotectedCount > 0) {
+                badges.push(`<span class="chip chip-recommend" title="Emails this preset recommends deleting">safe to delete: ${unprotectedCount.toLocaleString()}</span>`);
+            }
+
+            // On the safe tab, item.count comes from source_total; use it if 'count' is missing.
+            const totalForRow = item.count || item.source_total || (item.email_ids || []).length;
 
             return `
             <div class="pattern-item ${deleteQueue.has(item.key) ? 'selected' : ''} ${isDeleted ? 'deleted' : ''}"
@@ -510,24 +825,45 @@
                     <span class="pattern-meta">
                         ${isDeleted
                             ? `<span class="deleted-badge">✓ Deleted (${item.deleted_count} emails)</span>`
-                            : `${item.count.toLocaleString()} emails
-                               (${formatSize(item.size_bytes)})
+                            : `${totalForRow.toLocaleString()} emails
+                               ${item.size_bytes ? `(${formatSize(item.size_bytes)})` : ''}
                                ${item.unread > 0 ? `- ${item.unread} unread` : ''}
                                ${hasDeleted ? `<span class="partial-deleted">- ${item.deleted_count} deleted</span>` : ''}`
                         }
                     </span>
+                    <span class="pattern-chips">${badges.join(' ')}</span>
                 </div>
                 <div class="pattern-actions">
                     ${isDeleted ? '' : `
+                        ${showProtect ? `<button class="btn btn-sm btn-protect" onclick="event.stopPropagation(); protectSender('${item.type}', '${escapeAttr(item.key)}', '${escapeAttr(item.display)}')" title="Never delete from this sender">Protect</button>` : ''}
                         ${showUnsubscribe ? `<button class="btn btn-sm btn-unsubscribe-action" onclick="event.stopPropagation(); openUnsubscribe('${escapeAttr(item.key)}', '${escapeAttr(item.display)}')" title="Find unsubscribe link">Unsubscribe</button>` : ''}
                         <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openDrilldown('${item.type}', '${escapeAttr(item.key)}')">View All</button>
                         <input type="checkbox"
                                ${deleteQueue.has(item.key) ? 'checked' : ''}
-                               onclick="event.stopPropagation(); togglePattern('${item.type}', '${escapeAttr(item.key)}', ${item.email_ids.length}, ${item.size_bytes})">
+                               onclick="event.stopPropagation(); togglePattern('${item.type}', '${escapeAttr(item.key)}', ${(item.email_ids || []).length}, ${item.size_bytes || 0})">
                     `}
                 </div>
             </div>
         `}).join('');
+    }
+
+    async function protectSender(type, key, displayName) {
+        if (type !== 'sender_email' && type !== 'sender_domain') return;
+        const prettyType = type === 'sender_email' ? 'sender' : 'domain';
+        if (!confirm(`Never recommend deleting from this ${prettyType}?\n\n${displayName}\n\nYou can undo this from the Preferences view.`)) return;
+        try {
+            const resp = await fetch('/api/preferences/allow', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: type, value: key }),
+            });
+            const data = await resp.json();
+            if (data.error) throw new Error(data.error);
+            // Rescore in place so the recommendation disappears.
+            await onPresetChange(currentPreset);
+        } catch (e) {
+            alert('Failed to protect sender: ' + e.message);
+        }
     }
 
     // ========== Drill-down View ==========

@@ -5,6 +5,9 @@ client_secret*.json
 *.pem
 *.key
 
+# User preferences (allowlist/denylist, sent-cache)
+preferences.json
+
 # Environment variables (SECRETS)
 .env
 .env.*
@@ -13,6 +16,9 @@ client_secret*.json
 
 # Cache files
 analysis_cache.json
+analysis.db
+analysis.db-wal
+analysis.db-shm
 *.cache
 .cache/
 

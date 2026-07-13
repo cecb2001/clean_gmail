@@ -1240,3 +1240,110 @@ a:hover {
     transform: translateX(-50%) translateY(0);
     opacity: 1;
 }
+
+/* --- Intelligent cleanup UI --- */
+.preset-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    margin: 8px 0 16px;
+    background: #f5f7fa;
+    border: 1px solid #dfe4ea;
+    border-radius: 8px;
+    font-size: 14px;
+    flex-wrap: wrap;
+}
+
+.preset-bar select {
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid #cfd6df;
+    background: white;
+    font-size: 14px;
+}
+
+.preset-description {
+    color: #57606a;
+    font-style: italic;
+    flex: 1 1 auto;
+    min-width: 200px;
+}
+
+.preset-busy {
+    color: #6a737d;
+    font-style: italic;
+    font-size: 13px;
+}
+
+.pattern-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1.6;
+    font-weight: 500;
+    background: #e5e9ef;
+    color: #24292f;
+}
+
+.chip-conf-high  { background: #ffe5e5; color: #a1250b; }
+.chip-conf-med   { background: #fff4d1; color: #8a5a00; }
+.chip-conf-low   { background: #e5e9ef; color: #24292f; }
+.chip-protect    { background: #d9f2df; color: #116329; }
+.chip-recommend  { background: #ffe1c5; color: #9a3412; }
+
+.btn-protect {
+    background: #e6f0ff;
+    color: #0356a4;
+    border: 1px solid #b5d4ff;
+}
+.btn-protect:hover { background: #cddfff; }
+
+.stat-recommend .stat-value { color: #9a3412; }
+.stat-protect   .stat-value { color: #116329; }
+
+.cached-expiry {
+    color: #6a737d;
+    font-size: 13px;
+    margin: 4px 0 8px;
+}
+
+.cache-status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    margin: 0 0 16px;
+    background: #eef4fb;
+    border: 1px solid #cadff5;
+    border-radius: 8px;
+    font-size: 13px;
+    flex-wrap: wrap;
+}
+
+.cache-status-text {
+    color: #24476a;
+}
+
+.cache-status-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-danger-outline {
+    background: transparent;
+    color: #b1361e;
+    border: 1px solid #f5a99a;
+}
+.btn-danger-outline:hover {
+    background: #fde7e0;
+}

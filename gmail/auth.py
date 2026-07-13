@@ -76,11 +76,14 @@ class GmailAuth:
             include_granted_scopes='true',
             prompt='consent'
         )
-        return auth_url, state
+        # PKCE: the code_verifier generated here must be reused at token exchange.
+        return auth_url, state, getattr(flow, 'code_verifier', None)
 
-    def complete_authentication(self, authorization_response, redirect_uri):
+    def complete_authentication(self, authorization_response, redirect_uri, code_verifier=None):
         """Complete OAuth flow with the authorization response."""
         flow = self.create_auth_flow(redirect_uri)
+        if code_verifier:
+            flow.code_verifier = code_verifier
         flow.fetch_token(authorization_response=authorization_response)
 
         creds = flow.credentials

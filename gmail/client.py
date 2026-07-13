@@ -4,6 +4,11 @@ from googleapiclient.errors import HttpError
 import config
 
 
+class HistoryExpiredError(Exception):
+    """Raised when Gmail returns 404 for users.history.list — the historyId is
+    too old and the caller must fall back to a full re-analyze."""
+
+
 class GmailClient:
     """Wrapper for Gmail API operations."""
 
@@ -520,6 +525,154 @@ class GmailClient:
                 pass  # Ignore parsing errors
 
         return result
+
+    def list_history(self, start_history_id, history_types=None, max_pages=200):
+        """Fetch all changes since start_history_id via users.history.list.
+
+        Returns a dict:
+          {
+            'added_ids':   set[str],  # message IDs to (re)fetch metadata for
+            'deleted_ids': set[str],  # messages hard-deleted on Gmail's side
+            'latest_history_id': str,  # advance the cursor to this
+          }
+
+        Raises HistoryExpiredError on HTTP 404 (start_history_id too old — Gmail
+        only guarantees ~7 days of history; callers should fall back to a full
+        re-analyze).
+        """
+        types = history_types or ['messageAdded', 'messageDeleted',
+                                  'labelAdded', 'labelRemoved']
+        added_ids = set()
+        deleted_ids = set()
+        latest_history_id = str(start_history_id)
+        page_token = None
+        page = 0
+
+        while True:
+            page += 1
+            if page > max_pages:
+                print(f"[History] Hit max_pages={max_pages}, stopping early", flush=True)
+                break
+            try:
+                params = {
+                    'userId': 'me',
+                    'startHistoryId': str(start_history_id),
+                    'historyTypes': types,
+                }
+                if page_token:
+                    params['pageToken'] = page_token
+                resp = self.service.users().history().list(**params).execute()
+            except HttpError as e:
+                # Gmail returns 404 when the historyId is out of the retention window.
+                if getattr(e, 'resp', None) and e.resp.status == 404:
+                    raise HistoryExpiredError(
+                        f"startHistoryId={start_history_id} is too old for Gmail's "
+                        f"history retention. Run a full analysis to reset the cursor."
+                    ) from e
+                raise
+
+            if 'historyId' in resp:
+                latest_history_id = str(resp['historyId'])
+
+            for entry in resp.get('history', []) or []:
+                # messagesAdded and label events all point at existing messages;
+                # refetch metadata for everything in this entry so the stored
+                # flags reflect the latest state.
+                for section in ('messagesAdded', 'labelsAdded', 'labelsRemoved'):
+                    for item in entry.get(section, []) or []:
+                        msg = item.get('message') or item
+                        mid = msg.get('id')
+                        if mid:
+                            added_ids.add(mid)
+                # messagesDeleted are gone on Gmail's side.
+                for item in entry.get('messagesDeleted', []) or []:
+                    msg = item.get('message') or item
+                    mid = msg.get('id')
+                    if mid:
+                        deleted_ids.add(mid)
+
+            page_token = resp.get('nextPageToken')
+            if not page_token:
+                break
+
+        # A deletion supersedes an add/label change for the same ID within the
+        # same window — don't refetch metadata for something that no longer exists.
+        added_ids -= deleted_ids
+
+        print(f"[History] Δ since {start_history_id}: "
+              f"{len(added_ids)} to refetch, {len(deleted_ids)} deleted, "
+              f"latest={latest_history_id}", flush=True)
+
+        return {
+            'added_ids': added_ids,
+            'deleted_ids': deleted_ids,
+            'latest_history_id': latest_history_id,
+        }
+
+    def get_sent_recipients(self, max_emails=None, progress_callback=None):
+        """
+        Index recipients from the SENT mailbox to detect senders you've replied to.
+
+        Args:
+            max_emails: cap on messages inspected (default: config.SENT_PRESCAN_MAX)
+            progress_callback: fn(fetched, total_estimate)
+
+        Returns:
+            set of lowercased recipient email addresses (from To + Cc headers).
+        """
+        import time
+        from email.utils import getaddresses
+
+        cap = max_emails if max_emails is not None else config.SENT_PRESCAN_MAX
+
+        # List SENT message IDs.
+        message_ids = []
+        for msg in self.fetch_all_messages(
+            query='in:sent',
+            label_ids=None,
+            max_total=cap,
+        ):
+            message_ids.append(msg['id'])
+
+        if not message_ids:
+            return set()
+
+        print(f"[SentIndex] Fetching recipients from {len(message_ids)} sent messages", flush=True)
+
+        recipients = set()
+        batch_size = 100
+        for i in range(0, len(message_ids), batch_size):
+            batch_ids = message_ids[i:i + batch_size]
+            try:
+                messages = self.get_messages_batch(
+                    batch_ids,
+                    format='metadata',
+                    metadata_headers=['To', 'Cc'],
+                )
+            except Exception as e:
+                print(f"[SentIndex] Batch {i//batch_size + 1} failed: {e}", flush=True)
+                continue
+
+            for m in messages:
+                if 'error' in m:
+                    continue
+                headers = {h['name'].lower(): h['value']
+                           for h in m.get('payload', {}).get('headers', [])}
+                for field in ('to', 'cc'):
+                    raw = headers.get(field, '')
+                    if not raw:
+                        continue
+                    for _, addr in getaddresses([raw]):
+                        addr = (addr or '').strip().lower()
+                        if addr:
+                            recipients.add(addr)
+
+            if progress_callback:
+                progress_callback(min(i + batch_size, len(message_ids)), len(message_ids))
+            time.sleep(0.05)
+
+        print(f"[SentIndex] Indexed {len(recipients)} unique recipients", flush=True)
+        return recipients
 
     def get_unsubscribe_link_for_sender(self, sender_email, max_emails=5):
         """

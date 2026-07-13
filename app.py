@@ -8,16 +8,33 @@ import json
 import time
 
 import config
+import preferences
+import store
 from gmail import GmailAuth, GmailClient, EmailAnalyzer
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
+
+# Initialize persistent store and prune anything past its 7-day TTL.
+store.init()
+try:
+    _pruned = store.prune_expired()
+    if _pruned:
+        print(f"[Store] Pruned {_pruned} expired analysis run(s) at startup", flush=True)
+except Exception as _e:
+    print(f"[Store] prune_expired failed at startup: {_e}", flush=True)
 
 # Global state for session data
 _auth = GmailAuth()
 
 # Server-side storage for analysis data (keyed by user email)
 _analysis_cache = {}
+# Cache the authenticated Gmail user's address once per process; used as the
+# store's per-user key so we can support future multi-user use without a rewrite.
+_user_email_cache = {'value': None}
+# Keeps the analyzer instance around so /api/analyze/rescore can re-run scoring
+# against the already-fetched emails without re-hitting the Gmail API.
+_last_analyzer = {'instance': None}
 _analysis_job = {
     'running': False,
     'progress': None,
@@ -33,84 +50,144 @@ _delete_job = {
     'permanent': False
 }
 
-# File to persist analysis data
-ANALYSIS_CACHE_FILE = 'analysis_cache.json'
-
-def save_analysis_to_file(data):
-    """Save analysis data to file for persistence."""
+def _resolve_user_email(client=None):
+    """Return the authenticated Gmail address. Cached for the process lifetime."""
+    if _user_email_cache['value']:
+        return _user_email_cache['value']
+    if client is None:
+        client = get_gmail_client()
+    if client is None:
+        return None
     try:
-        with open(ANALYSIS_CACHE_FILE, 'w') as f:
-            json.dump(data, f)
-        print(f"[Cache] Saved analysis to {ANALYSIS_CACHE_FILE}", flush=True)
+        email = client.get_profile().get('email')
+        if email:
+            _user_email_cache['value'] = email.lower()
     except Exception as e:
-        print(f"[Cache] Failed to save analysis: {e}", flush=True)
+        print(f"[Store] Could not resolve user email: {e}", flush=True)
+    return _user_email_cache['value']
 
-def load_analysis_from_file():
-    """Load analysis data from file."""
+
+def _persist_current_run(analyzer, query, preset, history_id=None):
+    """Save the current analyzer's raw emails to the SQLite store.
+
+    history_id is the Gmail profile's historyId at the moment of the fetch — the
+    cursor for future incremental syncs. Passing None disables incremental sync
+    until the next full analyze.
+    """
+    user_email = _resolve_user_email(analyzer.client)
+    if not user_email:
+        print(f"[Store] Skipping save: user email unknown", flush=True)
+        return
     try:
-        if os.path.exists(ANALYSIS_CACHE_FILE):
-            with open(ANALYSIS_CACHE_FILE, 'r') as f:
-                data = json.load(f)
-            print(f"[Cache] Loaded analysis from {ANALYSIS_CACHE_FILE}", flush=True)
-            return data
+        store.save_run(user_email, query or '', preset, analyzer._emails,
+                       history_id=history_id)
+        print(f"[Store] Saved {len(analyzer._emails)} emails for {user_email} "
+              f"(expires in {config.ANALYSIS_TTL_DAYS}d, "
+              f"history_id={history_id})", flush=True)
     except Exception as e:
-        print(f"[Cache] Failed to load analysis: {e}", flush=True)
-    return None
+        print(f"[Store] save_run failed: {e}", flush=True)
+
+
+def _hydrate_analyzer_from_store():
+    """If the store has a live run for the current user, return an EmailAnalyzer
+    with its _emails pre-populated. Returns (analyzer, metadata) or (None, None)."""
+    user_email = _resolve_user_email()
+    if not user_email:
+        return None, None
+    metadata, emails = store.load_run(user_email)
+    if not metadata:
+        return None, None
+    client = get_gmail_client()
+    if client is None:
+        return None, None
+    engaged, allow, deny = _load_intelligence_inputs()
+    analyzer = EmailAnalyzer(
+        client,
+        engaged_senders=engaged,
+        allowlist=allow,
+        denylist=deny,
+        preset=metadata.get('preset', config.DEFAULT_PRESET),
+    )
+    analyzer._emails = emails
+    analyzer._analysis_cache = None
+    return analyzer, metadata
 
 
 def _update_cached_analysis(deleted_ids, save_to_file=True):
-    """Remove deleted email IDs from cached analysis data and persist to file."""
+    """Reconcile analysis state after a deletion.
+
+    Three layers to keep in sync:
+      1. SQLite store (durable): mark the emails soft-deleted so they don't
+         come back on the next load.
+      2. In-memory analyzer (_last_analyzer): drop the emails from _emails so
+         subsequent rescores don't re-count them.
+      3. In-memory aggregate (_analysis_cache['last_analysis']): decrement the
+         per-pattern email_ids / count / size so the UI reflects the delete
+         without a full rescore.
+
+    save_to_file is retained for signature compatibility; the store write is
+    always attempted.
+    """
+    deleted_ids_set = set(deleted_ids) if not isinstance(deleted_ids, set) else set(deleted_ids)
+    if not deleted_ids_set:
+        return
+
+    # 1. Store: soft-delete.
+    user_email = _resolve_user_email()
+    if user_email:
+        try:
+            n = store.mark_deleted(user_email, list(deleted_ids_set))
+            if n:
+                print(f"[Store] Soft-deleted {n} email(s) for {user_email}", flush=True)
+        except Exception as e:
+            print(f"[Store] mark_deleted failed: {e}", flush=True)
+
+    # 2. Analyzer instance: prune _emails so future rescores are correct.
+    analyzer = _last_analyzer.get('instance')
+    if analyzer is not None and analyzer._emails:
+        analyzer._emails = [e for e in analyzer._emails if e['id'] not in deleted_ids_set]
+        analyzer._analysis_cache = None  # force fresh aggregate next time
+
+    # 3. Aggregate cache: decrement per-pattern counts in place.
     analysis = _analysis_cache.get('last_analysis')
     if not analysis:
-        # Try to load from file if not in memory
-        analysis = load_analysis_from_file()
-        if analysis:
-            _analysis_cache['last_analysis'] = analysis
-        else:
-            return
-
-    deleted_ids_set = set(deleted_ids) if not isinstance(deleted_ids, set) else deleted_ids
+        return
     patterns = analysis.get('patterns', {})
-
-    # Update each category of patterns
-    for category_name, category_patterns in patterns.items():
+    for category_patterns in patterns.values():
         for pattern in category_patterns:
             original_ids = pattern.get('email_ids', [])
             original_count = len(original_ids)
-
-            # Remove deleted IDs
             remaining_ids = [eid for eid in original_ids if eid not in deleted_ids_set]
-
-            # Calculate how many were deleted in this update
             newly_deleted = original_count - len(remaining_ids)
-
             if newly_deleted > 0:
                 pattern['email_ids'] = remaining_ids
                 pattern['count'] = len(remaining_ids)
                 pattern['deleted_count'] = pattern.get('deleted_count', 0) + newly_deleted
-
-                # Track original count for UI display
                 if 'original_count' not in pattern:
                     pattern['original_count'] = original_count + pattern.get('deleted_count', 0) - newly_deleted
-
-                # Estimate size reduction (proportional)
                 if original_count > 0:
                     ratio = len(remaining_ids) / original_count
                     original_size = pattern.get('size_bytes', 0)
                     pattern['size_bytes'] = int(original_size * ratio)
-                    # Track deleted size
                     pattern['deleted_size_bytes'] = pattern.get('deleted_size_bytes', 0) + int(original_size * (1 - ratio))
 
-    # Update summary totals
     if 'summary' in analysis:
         total_deleted = len(deleted_ids_set)
         analysis['summary']['total_emails'] = max(0, analysis['summary'].get('total_emails', 0) - total_deleted)
         analysis['summary']['deleted_count'] = analysis['summary'].get('deleted_count', 0) + total_deleted
 
-    # Persist to file
-    if save_to_file:
-        save_analysis_to_file(analysis)
-        print(f"[Cache] Updated analysis cache after deleting {len(deleted_ids_set)} emails", flush=True)
+
+# --- Legacy shims for callers written against the old JSON file API. ---
+# Keep the entry points, drop the JSON write; persistence lives in the store now.
+def save_analysis_to_file(data):
+    """No-op shim: aggregate is derived from the store; do not write JSON."""
+    return
+
+
+def load_analysis_from_file():
+    """Legacy shim: returns the in-memory aggregate if present. The store
+    hydrates through _hydrate_analyzer_from_store() / api_analyze_cached()."""
+    return _analysis_cache.get('last_analysis')
 
 
 def get_gmail_client():
@@ -121,12 +198,46 @@ def get_gmail_client():
     return GmailClient(creds)
 
 
-def get_analyzer():
-    """Get or create email analyzer."""
+def _load_intelligence_inputs():
+    """Read allowlist/denylist and cached engaged-senders from preferences.json.
+
+    Returns (engaged_senders_set, allowlist, denylist).
+    """
+    prefs = preferences.load()
+    engaged = preferences.get_cached_sent_recipients()
+    return engaged, prefs.get('allowlist', []), prefs.get('denylist', [])
+
+
+def get_analyzer(preset=None, refresh_intelligence=True):
+    """Get or create email analyzer with intelligence inputs loaded from preferences."""
     client = get_gmail_client()
     if not client:
         return None
-    return EmailAnalyzer(client)
+    engaged, allow, deny = _load_intelligence_inputs() if refresh_intelligence else (set(), [], [])
+    return EmailAnalyzer(
+        client,
+        engaged_senders=engaged,
+        allowlist=allow,
+        denylist=deny,
+        preset=preset or config.DEFAULT_PRESET,
+    )
+
+
+def _valid_preset(name):
+    return name if name in config.CLEANUP_PRESETS else config.DEFAULT_PRESET
+
+
+def _ensure_sent_recipients_cache(client):
+    """Populate the sent-recipients cache if it's stale. Cheap when fresh."""
+    if preferences.is_sent_cache_fresh():
+        return preferences.get_cached_sent_recipients()
+    try:
+        recipients = client.get_sent_recipients()
+        preferences.update_sent_recipients(recipients)
+        return recipients
+    except Exception as e:
+        print(f"[SentIndex] Failed to build cache: {e}", flush=True)
+        return set()
 
 
 @app.route('/')
@@ -155,8 +266,9 @@ def login():
         return render_template('setup.html')
 
     redirect_uri = url_for('oauth_callback', _external=True)
-    auth_url, state = _auth.get_authorization_url(redirect_uri)
+    auth_url, state, code_verifier = _auth.get_authorization_url(redirect_uri)
     session['oauth_state'] = state
+    session['oauth_code_verifier'] = code_verifier
     return redirect(auth_url)
 
 
@@ -164,9 +276,10 @@ def login():
 def oauth_callback():
     """Handle OAuth callback."""
     redirect_uri = url_for('oauth_callback', _external=True)
+    code_verifier = session.pop('oauth_code_verifier', None)
 
     try:
-        _auth.complete_authentication(request.url, redirect_uri)
+        _auth.complete_authentication(request.url, redirect_uri, code_verifier=code_verifier)
     except Exception as e:
         return render_template('error.html', error=f"Authentication failed: {e}")
 
@@ -228,6 +341,7 @@ def api_analyze_start():
 
     data = request.get_json() or {}
     query = data.get('query', '')
+    preset = _valid_preset(data.get('preset'))
 
     # Reset job state
     _analysis_job = {
@@ -241,15 +355,42 @@ def api_analyze_start():
     import threading
 
     def run_analysis():
-        global _analysis_job, _analysis_cache
+        global _analysis_job, _analysis_cache, _last_analyzer
         try:
-            analyzer = get_analyzer()
-            if not analyzer:
-                _analysis_job['error'] = 'Failed to create analyzer'
+            client = get_gmail_client()
+            if not client:
+                _analysis_job['error'] = 'Failed to get Gmail client'
                 _analysis_job['running'] = False
                 return
 
-            client = analyzer.client
+            # Capture Gmail's current historyId as the cursor for future
+            # incremental syncs. Reading the profile is a single tiny API call.
+            try:
+                initial_history_id = client.get_profile().get('history_id')
+                print(f"[Analyze] Captured initial historyId={initial_history_id}", flush=True)
+            except Exception as _hid_err:
+                print(f"[Analyze] Failed to capture historyId: {_hid_err}", flush=True)
+                initial_history_id = None
+
+            # Stage 0: SENT pre-scan (skipped if cache is fresh).
+            _analysis_job['progress'] = {
+                'stage': 'indexing_sent',
+                'message': 'Indexing your sent mail (one-time, cached 24h)...',
+                'current': 0, 'total': 0,
+            }
+            engaged = _ensure_sent_recipients_cache(client)
+            prefs = preferences.load()
+            allow = prefs.get('allowlist', [])
+            deny = prefs.get('denylist', [])
+
+            analyzer = EmailAnalyzer(
+                client,
+                engaged_senders=engaged,
+                allowlist=allow,
+                denylist=deny,
+                preset=preset,
+            )
+
             analyzer._emails = []
             analyzer._analysis_cache = None
 
@@ -404,11 +545,14 @@ def api_analyze_start():
 
             result = analyzer.analyze()
             _analysis_cache['last_analysis'] = result
+            _last_analyzer['instance'] = analyzer
             _analysis_job['result'] = result
             _analysis_job['running'] = False
 
-            # Save to file for persistence
-            save_analysis_to_file(result)
+            # Durable persistence: store the raw emails so rescore and future
+            # sessions can work without re-hitting Gmail.
+            _persist_current_run(analyzer, query, preset,
+                                 history_id=initial_history_id)
 
             print(f"[Analyze] Complete!", flush=True)
 
@@ -435,7 +579,8 @@ def api_analyze_progress():
     if _analysis_job['error']:
         return jsonify({
             'status': 'error',
-            'error': _analysis_job['error']
+            'error': _analysis_job['error'],
+            'error_code': _analysis_job.get('error_code'),
         })
 
     if _analysis_job['result']:
@@ -453,22 +598,286 @@ def api_analyze_progress():
     return jsonify({'status': 'idle'})
 
 
-@app.route('/api/analyze/cached')
-def api_analyze_cached():
-    """Get cached analysis data if available (always reads from file for latest state)."""
+@app.route('/api/analyze/incremental', methods=['POST'])
+def api_analyze_incremental():
+    """Incrementally sync the cached analysis against Gmail.
+
+    Uses the stored historyId as the cursor: list_history returns the union of
+    added/label-changed/deleted message IDs since that point. We refetch metadata
+    for the changed IDs, hard-delete the deleted ones, advance the cursor, and
+    rescore against the store.
+
+    Reuses the /api/analyze/start job slot so the UI polls /api/analyze/progress
+    the same way for both flows.
+    """
+    global _analysis_job
+
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    if _analysis_job['running']:
+        return jsonify({'error': 'Analysis already running'}), 400
+
+    user_email = _resolve_user_email()
+    if not user_email:
+        return jsonify({'error': 'User email not resolvable — please re-login.'}), 400
+
+    s = store.status(user_email)
+    if not s:
+        return jsonify({'error': 'No cached analysis to sync. Run a full analysis first.'}), 400
+    stored_history_id = s.get('history_id')
+    if not stored_history_id:
+        # Older cache that predates incremental sync — no cursor to work from.
+        return jsonify({
+            'error': 'This cache was created before incremental sync was available. '
+                     'Please Re-analyze once to establish a history cursor.',
+            'code': 'no_history_cursor',
+        }), 409
+
+    data = request.get_json() or {}
+    preset = _valid_preset(data.get('preset') or s.get('preset'))
+
+    _analysis_job = {
+        'running': True,
+        'progress': {
+            'stage': 'syncing_history',
+            'message': f'Checking Gmail for changes since last sync…',
+            'current': 0, 'total': 0,
+        },
+        'result': None,
+        'error': None,
+    }
+
+    import threading
+
+    def run_incremental():
+        global _analysis_job, _analysis_cache, _last_analyzer
+        try:
+            client = get_gmail_client()
+            if not client:
+                _analysis_job['error'] = 'Failed to get Gmail client'
+                _analysis_job['running'] = False
+                return
+
+            from gmail.client import HistoryExpiredError
+            try:
+                delta = client.list_history(stored_history_id)
+            except HistoryExpiredError as e:
+                _analysis_job['error'] = str(e)
+                _analysis_job['error_code'] = 'history_expired'
+                _analysis_job['running'] = False
+                return
+
+            added_ids = list(delta['added_ids'])
+            deleted_ids = list(delta['deleted_ids'])
+            latest_hid = delta['latest_history_id']
+
+            _analysis_job['progress'] = {
+                'stage': 'syncing_history',
+                'message': f'{len(added_ids)} new/changed, {len(deleted_ids)} removed. Fetching metadata…',
+                'current': 0, 'total': len(added_ids),
+            }
+
+            # 1. Hard-delete anything Gmail no longer has.
+            if deleted_ids:
+                n = store.hard_delete_emails(user_email, deleted_ids)
+                print(f"[Incremental] Hard-deleted {n} row(s) from store", flush=True)
+
+            # 2. Refetch metadata for added/changed messages, parse, upsert.
+            new_or_changed = []
+            if added_ids:
+                metadata_headers = ['From', 'To', 'Subject', 'Date', 'List-Unsubscribe']
+                batch_size = 100
+                # Reuse the analyzer's _parse_message for identical shape as the
+                # full-analyze path.
+                parser = EmailAnalyzer(client)
+
+                for i in range(0, len(added_ids), batch_size):
+                    batch_ids = added_ids[i:i + batch_size]
+                    try:
+                        msgs = client.get_messages_batch(
+                            batch_ids, format='metadata',
+                            metadata_headers=metadata_headers,
+                        )
+                    except Exception as e:
+                        print(f"[Incremental] Batch fetch failed: {e}", flush=True)
+                        msgs = []
+                    for m in msgs:
+                        if 'error' in m:
+                            # Gmail may return 404 for messages deleted between
+                            # list_history and now — hard-delete these too.
+                            store.hard_delete_emails(user_email, [m.get('id')])
+                            continue
+                        try:
+                            new_or_changed.append(parser._parse_message(m))
+                        except Exception as e:
+                            print(f"[Incremental] Parse failed for {m.get('id')}: {e}", flush=True)
+
+                    _analysis_job['progress'] = {
+                        'stage': 'fetching_metadata',
+                        'message': f'Processed {min(i + batch_size, len(added_ids)):,} of {len(added_ids):,} changes',
+                        'current': min(i + batch_size, len(added_ids)),
+                        'total': len(added_ids),
+                    }
+
+                if new_or_changed:
+                    store.upsert_emails(user_email, new_or_changed)
+
+            # 3. Advance cursor + refresh counts + extend TTL.
+            store.update_history_cursor(user_email, latest_hid, extend_ttl=True)
+            store.recount(user_email)
+
+            # 4. Rescore against the store.
+            _analysis_job['progress'] = {
+                'stage': 'analyzing',
+                'message': 'Rescoring after sync…',
+                'current': 0, 'total': 0,
+            }
+            analyzer, metadata = _hydrate_analyzer_from_store()
+            if analyzer is None:
+                _analysis_job['error'] = 'Cache disappeared during incremental sync.'
+                _analysis_job['running'] = False
+                return
+            analyzer.set_intelligence_inputs(preset=preset)
+            result = analyzer.analyze()
+            result['cache_metadata'] = _serialize_cache_metadata(metadata)
+            result['incremental_delta'] = {
+                'added_or_changed': len(new_or_changed),
+                'deleted': len(deleted_ids),
+                'latest_history_id': latest_hid,
+            }
+
+            _analysis_cache['last_analysis'] = result
+            _last_analyzer['instance'] = analyzer
+            _analysis_job['result'] = result
+            _analysis_job['running'] = False
+
+            print(f"[Incremental] Complete: +{len(new_or_changed)} / -{len(deleted_ids)}", flush=True)
+
+        except Exception as e:
+            print(f"[Incremental] Error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            _analysis_job['error'] = str(e)
+            _analysis_job['running'] = False
+
+    thread = threading.Thread(target=run_incremental, daemon=True)
+    thread.start()
+    return jsonify({'status': 'started'})
+
+
+@app.route('/api/preferences', methods=['GET'])
+def api_preferences_get():
+    """Return allowlist + denylist + sent-cache freshness."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    prefs = preferences.load()
+    return jsonify({
+        'allowlist': prefs.get('allowlist', []),
+        'denylist': prefs.get('denylist', []),
+        'sent_cache_fresh': preferences.is_sent_cache_fresh(),
+        'sent_cache_size': len(preferences.get_cached_sent_recipients()),
+    })
+
+
+@app.route('/api/preferences/allow', methods=['POST'])
+def api_preferences_add_allow():
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    data = request.get_json() or {}
+    try:
+        state = preferences.add_to_allowlist(data.get('type', ''), data.get('value', ''))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({'allowlist': state.get('allowlist', [])})
+
+
+@app.route('/api/preferences/deny', methods=['POST'])
+def api_preferences_add_deny():
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    data = request.get_json() or {}
+    try:
+        state = preferences.add_to_denylist(data.get('type', ''), data.get('value', ''))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify({'denylist': state.get('denylist', [])})
+
+
+@app.route('/api/preferences/allow/<entry_type>/<path:value>', methods=['DELETE'])
+def api_preferences_remove_allow(entry_type, value):
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    state = preferences.remove_from_allowlist(entry_type, value)
+    return jsonify({'allowlist': state.get('allowlist', [])})
+
+
+@app.route('/api/preferences/deny/<entry_type>/<path:value>', methods=['DELETE'])
+def api_preferences_remove_deny(entry_type, value):
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    state = preferences.remove_from_denylist(entry_type, value)
+    return jsonify({'denylist': state.get('denylist', [])})
+
+
+@app.route('/api/analyze/rescore', methods=['POST'])
+def api_analyze_rescore():
+    """Rescore the previously-fetched emails with a new preset and/or updated
+    allowlist/denylist. No Gmail API calls."""
     if not _auth.is_authenticated():
         return jsonify({'error': 'Not authenticated'}), 401
 
-    # Always try loading from file first to get the latest state after deletions
-    cached = load_analysis_from_file()
-    if cached:
-        _analysis_cache['last_analysis'] = cached
-        return jsonify({
-            'status': 'available',
-            'data': cached
-        })
+    analyzer = _last_analyzer.get('instance')
+    if analyzer is None or not analyzer._emails:
+        return jsonify({'error': 'No fetched analysis in memory. Run analysis first.'}), 400
 
-    # Fall back to memory cache if file doesn't exist
+    data = request.get_json() or {}
+    preset = _valid_preset(data.get('preset'))
+    prefs = preferences.load()
+    engaged = preferences.get_cached_sent_recipients()
+
+    analyzer.set_intelligence_inputs(
+        engaged_senders=engaged,
+        allowlist=prefs.get('allowlist', []),
+        denylist=prefs.get('denylist', []),
+        preset=preset,
+    )
+    result = analyzer.rescore()
+    _analysis_cache['last_analysis'] = result
+    # Record the preset change on the current run so a page refresh loads it back.
+    user_email = _resolve_user_email()
+    if user_email:
+        try:
+            store.touch_preset(user_email, preset)
+        except Exception as e:
+            print(f"[Store] touch_preset failed: {e}", flush=True)
+    return jsonify({'status': 'ok', 'data': result})
+
+
+@app.route('/api/analyze/cached')
+def api_analyze_cached():
+    """Return cached analysis if a live run exists.
+
+    Preference order:
+      1. Hydrate from the SQLite store — this survives process restarts and
+         reflects any soft-deletes recorded there.
+      2. Fall back to the in-memory aggregate (same process, since analyze).
+    Hydrating repopulates _last_analyzer so /api/analyze/rescore works without
+    a Gmail fetch.
+    """
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    # 1. Try the durable store first.
+    analyzer, metadata = _hydrate_analyzer_from_store()
+    if analyzer is not None:
+        result = analyzer.analyze()
+        # Fold the store metadata into the response so the UI can show expiry.
+        result['cache_metadata'] = _serialize_cache_metadata(metadata)
+        _analysis_cache['last_analysis'] = result
+        _last_analyzer['instance'] = analyzer
+        return jsonify({'status': 'available', 'data': result})
+
+    # 2. In-memory fallback (mid-session before any store save).
     if _analysis_cache.get('last_analysis'):
         return jsonify({
             'status': 'available',
@@ -476,6 +885,53 @@ def api_analyze_cached():
         })
 
     return jsonify({'status': 'none'})
+
+
+def _serialize_cache_metadata(metadata):
+    """Adapt a store.load_run() metadata dict for API/UI consumption."""
+    if not metadata:
+        return None
+    return {
+        'user_email': metadata.get('user_email'),
+        'query': metadata.get('query'),
+        'preset': metadata.get('preset'),
+        'created_at': metadata.get('created_at'),
+        'expires_at': metadata.get('expires_at'),
+        'total_emails': metadata.get('total_emails'),
+        'total_size_bytes': metadata.get('total_size_bytes'),
+        'ttl_days': config.ANALYSIS_TTL_DAYS,
+    }
+
+
+@app.route('/api/analysis/status', methods=['GET'])
+def api_analysis_status():
+    """Report whether a cached run exists, when it expires, and active/deleted counts."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    user_email = _resolve_user_email()
+    if not user_email:
+        return jsonify({'cached': False, 'reason': 'user_email_unknown'})
+    s = store.status(user_email)
+    if not s:
+        return jsonify({'cached': False})
+    return jsonify({'cached': True, 'status': s})
+
+
+@app.route('/api/analysis/clear', methods=['POST'])
+def api_analysis_clear():
+    """Manually clear the cached analysis for the current user."""
+    if not _auth.is_authenticated():
+        return jsonify({'error': 'Not authenticated'}), 401
+    user_email = _resolve_user_email()
+    if user_email:
+        try:
+            store.clear(user_email)
+            print(f"[Store] Cleared cache for {user_email}", flush=True)
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    _analysis_cache.pop('last_analysis', None)
+    _last_analyzer['instance'] = None
+    return jsonify({'cleared': True})
 
 
 @app.route('/api/delete/start', methods=['POST'])
@@ -779,6 +1235,13 @@ def api_analyze_stream():
             analyzer._emails = []
             analyzer._analysis_cache = None
 
+            # Capture historyId before any fetching so future incremental syncs
+            # have a valid cursor.
+            try:
+                stream_history_id = client.get_profile().get('history_id')
+            except Exception:
+                stream_history_id = None
+
             # Stage 1: Fetch message IDs
             yield f"data: {json.dumps({'type': 'progress', 'current': 0, 'total': 0, 'stage': 'fetching_ids', 'message': 'Fetching email IDs...'})}\n\n"
 
@@ -920,6 +1383,9 @@ def api_analyze_stream():
 
             result = analyzer.analyze()
             _analysis_cache['last_analysis'] = result
+            _last_analyzer['instance'] = analyzer
+            _persist_current_run(analyzer, query, analyzer.preset,
+                                 history_id=stream_history_id)
 
             yield f"data: {json.dumps({'type': 'complete', 'data': result})}\n\n"
 
