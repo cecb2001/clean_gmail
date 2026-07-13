@@ -69,10 +69,12 @@
     <div id="result" class="result-container" style="display: none;">
         <h2 id="resultTitle">Deletion Complete</h2>
         <p id="resultMessage"></p>
+        <p id="resultHint" class="result-hint">Your cached analysis has been updated. You can keep selecting from the same analysis — no re-fetch needed.</p>
         <div class="result-actions">
-            <a href="{{ url_for('analyze') }}" class="btn btn-primary">Analyze More</a>
+            <a href="{{ url_for('analyze') }}?continue=1" class="btn btn-primary">Continue selecting</a>
             <a href="{{ url_for('index') }}" class="btn btn-secondary">Dashboard</a>
         </div>
+        <p id="autoReturnNotice" class="auto-return-notice"></p>
     </div>
 </div>
 {% endblock %}
@@ -480,6 +482,59 @@
         document.getElementById('resultTitle').textContent = success ? 'Deletion Complete' : 'Deletion Failed';
         document.getElementById('resultTitle').className = success ? 'success' : 'error';
         document.getElementById('resultMessage').textContent = message;
+
+        if (success && source !== 'trash') {
+            scheduleAutoReturn();
+        }
+    }
+
+    // Auto-return to /analyze so the user picks up where they left off, with the
+    // updated cached analysis. Any user interaction cancels the countdown.
+    let _autoReturnTimer = null;
+    let _autoReturnRemaining = 4;
+
+    function scheduleAutoReturn() {
+        const notice = document.getElementById('autoReturnNotice');
+        const hint = document.getElementById('resultHint');
+        if (hint) hint.style.display = 'block';
+
+        const tick = () => {
+            if (_autoReturnRemaining <= 0) {
+                // ?continue=1 tells the analyze page to skip the "Previous
+                // Analysis Found" prompt and use the cache directly.
+                window.location.href = "{{ url_for('analyze') }}" + "?continue=1";
+                return;
+            }
+            if (notice) {
+                notice.innerHTML =
+                    `Returning to your analysis in <strong>${_autoReturnRemaining}s</strong>… ` +
+                    `<a href="#" onclick="cancelAutoReturn(event)">Stay here</a>`;
+            }
+            _autoReturnRemaining -= 1;
+            _autoReturnTimer = setTimeout(tick, 1000);
+        };
+        tick();
+
+        // Any click or keypress cancels — the user is engaging with the result.
+        document.addEventListener('click', maybeCancelOnInteract, { once: true });
+        document.addEventListener('keydown', maybeCancelOnInteract, { once: true });
+    }
+
+    function maybeCancelOnInteract(e) {
+        // Don't cancel if the click is on one of the destination buttons — the
+        // user has already picked a next step.
+        if (e && e.target && e.target.closest('.result-actions a')) return;
+        cancelAutoReturn();
+    }
+
+    function cancelAutoReturn(e) {
+        if (e) e.preventDefault();
+        if (_autoReturnTimer) {
+            clearTimeout(_autoReturnTimer);
+            _autoReturnTimer = null;
+        }
+        const notice = document.getElementById('autoReturnNotice');
+        if (notice) notice.textContent = '';
     }
 </script>
 {% endblock %}

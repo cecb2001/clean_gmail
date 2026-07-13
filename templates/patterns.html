@@ -284,6 +284,16 @@
                 const deletedCount = summary.deleted_count || 0;
                 const meta = data.data.cache_metadata;
 
+                // If we arrived via ?continue=1 (from the confirm page after a
+                // delete), skip the "Previous Analysis Found" prompt and load
+                // the cached analysis straight into the results view — the
+                // user is mid-workflow, not returning to an old session.
+                const params = new URLSearchParams(window.location.search);
+                if (params.get('continue') === '1') {
+                    useCachedAnalysis();
+                    return;
+                }
+
                 let infoText = `Found previous analysis: ${totalEmails.toLocaleString()} emails (${totalSize.toFixed(1)} MB)`;
                 if (deletedCount > 0) {
                     infoText += ` - ${deletedCount.toLocaleString()} already deleted`;

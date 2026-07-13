@@ -1325,6 +1325,27 @@ a:hover {
     margin-top: 2px;
 }
 
+.result-hint {
+    color: #24476a;
+    background: #eef4fb;
+    border: 1px solid #cadff5;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin: 12px 0;
+    font-size: 14px;
+}
+
+.auto-return-notice {
+    color: #6a737d;
+    font-size: 13px;
+    margin-top: 10px;
+    text-align: center;
+}
+.auto-return-notice a {
+    color: #0356a4;
+    text-decoration: underline;
+}
+
 .btn-protect {
     background: #e6f0ff;
     color: #0356a4;
