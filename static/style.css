@@ -1312,6 +1312,52 @@ a:hover {
 }
 .filter-pill--protected.active:hover { background: #ede8c0; }
 
+/* Drill-down view tabs (All / Safe to delete / Protected) */
+.drill-view-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 8px 20px;
+    border-bottom: 1px solid #e1e4e8;
+    background: #f9fafb;
+}
+
+.drill-view-btn {
+    padding: 4px 12px;
+    border-radius: 6px;
+    border: 1px solid #cfd6df;
+    background: #f0f3f6;
+    color: #57606a;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.drill-view-btn:hover { background: #e3e8ef; }
+.drill-view-btn.active { background: #e1e4e8; color: #24292f; border-color: #adb5bd; font-weight: 600; }
+
+.drill-view-btn--safe.active {
+    background: #d9f2df;
+    color: #116329;
+    border-color: #b8e2c1;
+    font-weight: 600;
+}
+.drill-view-btn--safe.active:hover { background: #c9ead1; }
+
+.drill-view-btn--protected.active {
+    background: #fff4d1;
+    color: #8a5a00;
+    border-color: #f0d070;
+    font-weight: 600;
+}
+.drill-view-btn--protected.active:hover { background: #ede8c0; }
+
+/* "Safe (N)" quick-filter button on mixed pattern rows */
+.btn-safe-view {
+    background: #d9f2df;
+    color: #116329;
+    border: 1px solid #b8e2c1;
+}
+.btn-safe-view:hover { background: #c9ead1; }
+
 .pattern-chips {
     display: flex;
     flex-wrap: wrap;

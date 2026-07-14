@@ -136,6 +136,7 @@
                 <button class="modal-close" onclick="closeDrilldown()">&times;</button>
             </div>
             <div class="modal-subheader" id="drilldownInfo"></div>
+            <div id="drillViewTabs" class="drill-view-tabs" style="display: none;"></div>
             <div class="modal-body" id="drilldownBody">
                 <div id="emailList"></div>
                 <div id="pagination" class="pagination"></div>
@@ -150,6 +151,7 @@
                 </div>
                 <div class="modal-buttons">
                     <button class="btn btn-secondary" onclick="closeDrilldown()">Close</button>
+                    <button class="btn btn-primary" id="selectAllSafeBtn" onclick="selectAllSafeInDrilldown()" style="display: none;">Select all safe</button>
                     <button class="btn btn-danger" id="addSelectedBtn" onclick="addSelectedEmailsToQueue()">Add Selected to Delete</button>
                 </div>
             </div>
@@ -247,6 +249,10 @@
     let currentPreset = 'conservative';
     // 'none' | 'safe' | 'protected'
     let patternFilter = 'none';
+
+    // Full pattern object for the currently-open drill-down (used to access
+    // unprotected_email_ids for bulk "Select all safe").
+    let currentDrilldownItem = null;
 
     // Email selection in drilldown
     let selectedEmails = new Set();
@@ -1019,6 +1025,7 @@
                     ${isDeleted ? '' : `
                         ${showProtect ? `<button class="btn btn-sm btn-protect" onclick="event.stopPropagation(); protectSender('${item.type}', '${escapeAttr(item.key)}', '${escapeAttr(item.display)}')" title="Never delete from this sender">Protect</button>` : ''}
                         ${showUnsubscribe ? `<button class="btn btn-sm btn-unsubscribe-action" onclick="event.stopPropagation(); openUnsubscribe('${escapeAttr(item.key)}', '${escapeAttr(item.display)}')" title="Find unsubscribe link">Unsubscribe</button>` : ''}
+                        ${unprotectedCount > 0 && protectedCount > 0 ? `<button class="btn btn-sm btn-safe-view" onclick="event.stopPropagation(); openDrilldown('${item.type}', '${escapeAttr(item.key)}', 'unprotected')" title="View only the emails safe to delete in this group">Safe (${unprotectedCount.toLocaleString()})</button>` : ''}
                         <button class="btn btn-sm btn-secondary" onclick="event.stopPropagation(); openDrilldown('${item.type}', '${escapeAttr(item.key)}')">View All</button>
                         <input type="checkbox"
                                ${deleteQueue.has(item.key) ? 'checked' : ''}
@@ -1052,13 +1059,68 @@
     }
 
     // ========== Drill-down View ==========
+    function findPatternItem(type, key) {
+        if (!analysisData) return null;
+        for (const category of Object.values(analysisData.patterns)) {
+            for (const item of category) {
+                if (item.type === type && item.key === key) return item;
+            }
+        }
+        return null;
+    }
+
     async function openDrilldown(type, key, view) {
-        // view: 'protected' opens the modal filtered to kept-safe emails with
-        // reasons; anything else shows the default set for that pattern.
+        // view: 'protected' | 'unprotected' | 'default'
         currentPattern = { type, key, view: view || 'default' };
+        currentDrilldownItem = findPatternItem(type, key);
         currentPage = 1;
         document.getElementById('drilldownModal').style.display = 'flex';
+        renderDrilldownViewTabs();
         await loadEmails(1);
+    }
+
+    function renderDrilldownViewTabs() {
+        const tabsEl = document.getElementById('drillViewTabs');
+        if (!tabsEl) return;
+        const item = currentDrilldownItem;
+        const protectedC = item?.protected_count || 0;
+        const unprotectedC = item?.unprotected_count || 0;
+        // Only show tabs when there are emails in both buckets.
+        if (!item || protectedC === 0 || unprotectedC === 0) {
+            tabsEl.style.display = 'none';
+            return;
+        }
+        const view = currentPattern.view || 'default';
+        const totalC = (item.count || item.source_total || (item.email_ids || []).length);
+        tabsEl.style.display = 'flex';
+        tabsEl.innerHTML = `
+            <button class="drill-view-btn ${view === 'default' ? 'active' : ''}" onclick="switchDrilldownView('default')">All (${totalC.toLocaleString()})</button>
+            <button class="drill-view-btn drill-view-btn--safe ${view === 'unprotected' ? 'active' : ''}" onclick="switchDrilldownView('unprotected')">Safe to delete (${unprotectedC.toLocaleString()})</button>
+            <button class="drill-view-btn drill-view-btn--protected ${view === 'protected' ? 'active' : ''}" onclick="switchDrilldownView('protected')">Protected (${protectedC.toLocaleString()})</button>
+        `;
+        // Show / hide "Select all safe" button based on current view.
+        const safeBtn = document.getElementById('selectAllSafeBtn');
+        if (safeBtn) safeBtn.style.display = view === 'unprotected' ? 'inline-block' : 'none';
+    }
+
+    function switchDrilldownView(view) {
+        if (!currentPattern) return;
+        currentPattern.view = view;
+        currentPage = 1;
+        renderDrilldownViewTabs();
+        loadEmails(1);
+    }
+
+    async function selectAllSafeInDrilldown() {
+        const item = currentDrilldownItem;
+        const ids = item?.unprotected_email_ids || [];
+        if (!ids.length) { showToast('No safe emails found.'); return; }
+        const newIds = ids.filter(id => !globalDeleteQueue.has(id));
+        if (!newIds.length) { showToast('All safe emails are already in the delete queue.'); return; }
+        if (!confirm(`Add all ${ids.length.toLocaleString()} safe email${ids.length === 1 ? '' : 's'} from this group to the delete queue?`)) return;
+        newIds.forEach(id => globalDeleteQueue.add(id));
+        updateGlobalDeleteQueueUI();
+        showToast(`Added ${newIds.length.toLocaleString()} safe email${newIds.length === 1 ? '' : 's'} to the delete queue.`);
     }
 
     async function loadEmails(page) {
@@ -1076,15 +1138,16 @@
                 return;
             }
 
-            // Header: prefix with "Kept safe:" when in protected view so the
-            // user always knows which slice they're looking at.
-            const titlePrefix = view === 'protected' ? 'Kept safe · ' : '';
+            // Header prefix so the user always knows which slice they're looking at.
+            const titlePrefix = view === 'protected' ? 'Kept safe · '
+                : view === 'unprotected' ? 'Safe to delete · ' : '';
             document.getElementById('drilldownTitle').textContent = titlePrefix + data.pattern.display;
             document.getElementById('drilldownInfo').innerHTML = `
                 <span><strong>${data.pattern.count.toLocaleString()}</strong> emails</span>
                 <span><strong>${formatSize(data.pattern.size_bytes)}</strong> total size</span>
                 <span>Page ${data.pagination.page} of ${data.pagination.total_pages}</span>
                 ${view === 'protected' ? '<span class="chip chip-protect" style="margin-left:8px;">protected view</span>' : ''}
+                ${view === 'unprotected' ? '<span class="chip chip-recommend" style="margin-left:8px;">safe to delete view</span>' : ''}
             `;
 
             // Store current page emails for selection
@@ -1208,7 +1271,10 @@
     function closeDrilldown() {
         document.getElementById('drilldownModal').style.display = 'none';
         currentPattern = null;
-        // Clear selections when closing
+        currentDrilldownItem = null;
+        document.getElementById('drillViewTabs').style.display = 'none';
+        const safeBtn = document.getElementById('selectAllSafeBtn');
+        if (safeBtn) safeBtn.style.display = 'none';
         selectedEmails.clear();
         currentPageEmails = [];
         document.getElementById('selectAllEmails').checked = false;
