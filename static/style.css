@@ -1276,24 +1276,41 @@ a:hover {
     font-size: 13px;
 }
 
-.filter-fully-safe {
+.filter-pills {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    margin-left: auto;
+}
+
+.filter-pill {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
     padding: 4px 10px;
-    background: #d9f2df;
-    color: #116329;
-    border: 1px solid #b8e2c1;
+    background: #f0f3f6;
+    color: #57606a;
+    border: 1px solid #cfd6df;
     border-radius: 6px;
     font-size: 13px;
     cursor: pointer;
     user-select: none;
-    margin-left: auto;  /* pushes to the right of the preset bar */
+    transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
-.filter-fully-safe input {
-    accent-color: #116329;
+.filter-pill:hover { background: #e3e8ef; }
+
+.filter-pill--safe.active {
+    background: #d9f2df;
+    color: #116329;
+    border-color: #b8e2c1;
 }
-.filter-fully-safe:hover { background: #c9ead1; }
+.filter-pill--safe.active:hover { background: #c9ead1; }
+
+.filter-pill--protected.active {
+    background: #fff4d1;
+    color: #8a5a00;
+    border-color: #f0d070;
+}
+.filter-pill--protected.active:hover { background: #ede8c0; }
 
 .pattern-chips {
     display: flex;

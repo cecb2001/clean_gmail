@@ -72,10 +72,14 @@
                 <span id="presetDescription" class="preset-description"></span>
                 <span id="presetBusy" class="preset-busy" style="display:none;">Re-scoring…</span>
 
-                <label class="filter-fully-safe" title="Only show groups where every email is recommended for deletion (nothing kept safe)">
-                    <input type="checkbox" id="filterFullySafeChk" onchange="onFilterFullySafeToggle(this.checked)">
-                    Fully-safe groups only
-                </label>
+                <div class="filter-pills">
+                    <button class="filter-pill filter-pill--safe" id="filterSafeBtn"
+                            onclick="onPatternFilterChange('safe')"
+                            title="Show only groups where every email is safe to delete">Safe to delete</button>
+                    <button class="filter-pill filter-pill--protected" id="filterProtectedBtn"
+                            onclick="onPatternFilterChange('protected')"
+                            title="Show only groups that have some protected emails">Has protected emails</button>
+                </div>
                 <button id="selectAllFullySafeBtn"
                         class="btn btn-sm btn-primary"
                         onclick="selectAllVisibleForDelete()"
@@ -241,9 +245,8 @@
     let patternPage = 1;
     const patternsPerPage = 50;
     let currentPreset = 'conservative';
-    // "Fully safe" means the group has 0 protected emails AND at least one
-    // unprotected email — deleting the whole group is risk-free.
-    let filterFullySafe = false;
+    // 'none' | 'safe' | 'protected'
+    let patternFilter = 'none';
 
     // Email selection in drilldown
     let selectedEmails = new Set();
@@ -846,20 +849,14 @@
         displayPatternPage(1);
     }
 
-    function isFullySafe(item) {
-        // Both prerequisites: at least one unprotected email AND nothing being
-        // held back. protected_count == 0 alone would also match empty groups.
-        const unprotected = item.unprotected_count || 0;
-        const protectedC = item.protected_count || 0;
-        return unprotected > 0 && protectedC === 0;
-    }
-
     function getVisiblePatternItems() {
-        // Applies the current filter to allPatternItems. Kept as a pure
-        // derivation so both the pagination and the "Select all visible"
-        // action agree on which patterns count as "visible".
-        if (filterFullySafe) {
-            return allPatternItems.filter(isFullySafe);
+        if (patternFilter === 'safe') {
+            return allPatternItems.filter(item =>
+                (item.unprotected_count || 0) > 0 && (item.protected_count || 0) === 0
+            );
+        }
+        if (patternFilter === 'protected') {
+            return allPatternItems.filter(item => (item.protected_count || 0) > 0);
         }
         return allPatternItems;
     }
@@ -881,23 +878,22 @@
     function updateFilterHint() {
         const btn = document.getElementById('selectAllFullySafeBtn');
         if (!btn) return;
-        // Show "Select all visible" only when the filter is active (otherwise
-        // the button could sweep in patterns with protected emails).
-        btn.style.display = filterFullySafe && getVisiblePatternItems().length > 0
+        btn.style.display = patternFilter === 'safe' && getVisiblePatternItems().length > 0
             ? 'inline-block'
             : 'none';
     }
 
-    function onFilterFullySafeToggle(checked) {
-        filterFullySafe = !!checked;
-        // Reset to page 1 whenever the filter set changes.
+    function onPatternFilterChange(type) {
+        patternFilter = (patternFilter === type) ? 'none' : type;
+        document.getElementById('filterSafeBtn')?.classList.toggle('active', patternFilter === 'safe');
+        document.getElementById('filterProtectedBtn')?.classList.toggle('active', patternFilter === 'protected');
         displayPatternPage(1);
     }
 
     function selectAllVisibleForDelete() {
         const visible = getVisiblePatternItems();
         if (!visible.length) return;
-        if (!confirm(`Add ${visible.length.toLocaleString()} fully-safe group${visible.length === 1 ? '' : 's'} to the delete queue?`)) return;
+        if (!confirm(`Add ${visible.length.toLocaleString()} group${visible.length === 1 ? '' : 's'} to the delete queue?`)) return;
         let added = 0;
         for (const item of visible) {
             if (!deleteQueue.has(item.key)) {
@@ -959,10 +955,11 @@
         const list = document.getElementById('patternList');
 
         if (items.length === 0) {
-            if (filterFullySafe) {
-                list.innerHTML = `
-                    <p class="no-data">No groups in this tab are fully safe (every group has at least one email being kept safe).
-                    <br><a href="#" onclick="event.preventDefault(); document.getElementById('filterFullySafeChk').checked = false; onFilterFullySafeToggle(false);">Turn off the filter</a> to see them.</p>`;
+            const clearLink = `<a href="#" onclick="event.preventDefault(); onPatternFilterChange(patternFilter);">Turn off the filter</a>`;
+            if (patternFilter === 'safe') {
+                list.innerHTML = `<p class="no-data">No groups in this tab are fully safe to delete. ${clearLink} to see all.</p>`;
+            } else if (patternFilter === 'protected') {
+                list.innerHTML = `<p class="no-data">No groups in this tab have protected emails. ${clearLink} to see all.</p>`;
             } else {
                 list.innerHTML = '<p class="no-data">No patterns found in this category.</p>';
             }
