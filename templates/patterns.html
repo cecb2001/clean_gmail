@@ -325,6 +325,9 @@
                 document.getElementById('cachedInfo').textContent = infoText;
                 document.getElementById('cachedExpiry').textContent = formatCacheExpiry(meta);
                 document.getElementById('cachedAnalysisPrompt').style.display = 'block';
+                // Hide the main button — the prompt's own "Analyze Again" button
+                // is the correct entry point for starting a fresh run.
+                document.getElementById('analyzeBtn').style.display = 'none';
 
                 // Restore any saved selections
                 restoreSelectionState();
@@ -362,6 +365,7 @@
             analysisData = null;
             document.getElementById('cachedAnalysisPrompt').style.display = 'none';
             document.getElementById('results').style.display = 'none';
+            document.getElementById('analyzeBtn').style.display = '';
         } catch (e) {
             alert('Failed to clear cache: ' + e.message);
         }
@@ -392,6 +396,7 @@
 
     function startFreshAnalysis() {
         document.getElementById('cachedAnalysisPrompt').style.display = 'none';
+        document.getElementById('analyzeBtn').style.display = '';
         startAnalysis();
     }
 
