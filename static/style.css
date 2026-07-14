@@ -1276,6 +1276,25 @@ a:hover {
     font-size: 13px;
 }
 
+.filter-fully-safe {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: #d9f2df;
+    color: #116329;
+    border: 1px solid #b8e2c1;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+    margin-left: auto;  /* pushes to the right of the preset bar */
+}
+.filter-fully-safe input {
+    accent-color: #116329;
+}
+.filter-fully-safe:hover { background: #c9ead1; }
+
 .pattern-chips {
     display: flex;
     flex-wrap: wrap;
