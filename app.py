@@ -1915,4 +1915,5 @@ if __name__ == '__main__':
     print(f"\nStarting server at http://127.0.0.1:5000")
     print("Press Ctrl+C to stop\n")
 
-    app.run(debug=config.DEBUG, port=5000)
+    port = int(os.environ.get('PORT', 5001))
+    app.run(debug=config.DEBUG, port=port)
