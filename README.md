@@ -19,9 +19,24 @@ A local Flask app that analyzes your Gmail inbox and recommends emails to delete
 
 ### 2. Install dependencies
 
+**macOS / Linux**
 ```bash
 python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Windows (PowerShell)**
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+**Windows (Command Prompt)**
+```cmd
+python -m venv .venv
+.venv\Scripts\activate.bat
 pip install -r requirements.txt
 ```
 
