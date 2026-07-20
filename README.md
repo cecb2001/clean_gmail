@@ -33,6 +33,12 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+> If PowerShell says "running scripts is disabled", run this once to allow local scripts:
+> ```powershell
+> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+> ```
+> Then re-run `.venv\Scripts\Activate.ps1`. Alternatively, use **Command Prompt** instead (no policy restriction).
+
 **Windows (Command Prompt)**
 ```cmd
 python -m venv .venv
